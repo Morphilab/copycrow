@@ -1,0 +1,49 @@
+# ========================================
+# copycrow — .gitignore
+# ========================================
+
+# ================== Archivos de configuración sensibles ==================
+copycrow.conf
+*.env
+*.env.*
+.env
+
+# ================== Directorios temporales ==================
+.mnt/*
+!.mnt/.gitkeep
+
+.locks/*
+!.locks/.gitkeep
+
+# ================== Logs ==================
+logs/*
+!.logs/.gitkeep     # Corregido
+*.log
+
+# ================== Archivos temporales del editor ==================
+*.bak
+*.swp
+*.swo
+*~
+*.tmp
+.DS_Store
+
+# ================== Cachés y basura ==================
+__pycache__/
+*.py[cod]
+.cache/
+.vscode/
+.idea/
+
+# ================== Archivos generados ==================
+*.tar.gz
+*.zip
+*.backup
+backup-*
+
+# ================== Seguridad ==================
+# Ignorar cualquier archivo que contenga "key", "secret", "password", etc.
+*secret*
+*password*
+*credential*
+*token*

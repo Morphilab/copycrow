@@ -1,0 +1,354 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════════
+# copycrow — timer-generator.sh
+# systemd timer generator for automatic backups
+# ═══════════════════════════════════════════════════════════════════════════════
+set -euo pipefail
+
+# Project root directory
+COPYCROW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# systemd user directory
+SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
+
+# copycrow timer prefix
+TIMER_PREFIX="copycrow"
+
+# ───────────────────────────────────────────────────────────────────────────────
+# timer_convert_schedule
+# Converts a human-readable schedule to systemd OnCalendar format
+# ───────────────────────────────────────────────────────────────────────────────
+timer_convert_schedule() {
+    local schedule="$1"
+
+    case "$schedule" in
+        daily)   echo "*-*-* 02:00:00" ;;
+        weekly)  echo "Mon *-*-* 02:00:00" ;;
+        monthly) echo "*-*-01 02:00:00" ;;
+        minutes*)
+            local clock="${schedule#minutes}"
+            if [[ -n "$clock" ]]; then
+                echo "*-*-* ${clock}:00"
+            else
+                echo "*-*-* 02:00:00"
+            fi
+            ;;
+        *)       echo "*-*-* 02:00:00" ;;
+    esac
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# timer_generate
+# Generates .service and .timer files for a job
+# ───────────────────────────────────────────────────────────────────────────────
+timer_generate() {
+    local section="$1"
+
+    local schedule=$(config_get_var "$section" "schedule")
+    if [[ -z "$schedule" ]]; then
+        echo "WARNING: [$section] has no schedule, defaulting to daily"
+        schedule="daily"
+    fi
+
+    local timer_name="${TIMER_PREFIX}-${section}"
+    local on_calendar
+    on_calendar=$(timer_convert_schedule "$schedule")
+
+    mkdir -p "$SYSTEMD_USER_DIR"
+
+    local env_dir="${HOME}/.config/copycrow"
+    local env_file="${env_dir}/borg.env"
+    local env_line=""
+    local wrote_env_file=false
+
+    if [[ -n "${BORG_PASSPHRASE:-}" ]]; then
+        mkdir -p "$env_dir"
+        chmod 700 "$env_dir"
+        {
+            echo "# copycrow — environment for automatic backups"
+            echo "# Auto-generated. Do not edit manually."
+            echo "BORG_PASSPHRASE=${BORG_PASSPHRASE}"
+        } > "$env_file"
+        chmod 600 "$env_file"
+        env_line="EnvironmentFile=${env_file}"
+        wrote_env_file=true
+    fi
+    if [[ -n "${BORG_PASSCOMMAND:-}" ]]; then
+        if [[ "$wrote_env_file" == "false" ]]; then
+            mkdir -p "$env_dir"
+            chmod 700 "$env_dir"
+            {
+                echo "# copycrow — environment for automatic backups"
+                echo "# Auto-generated. Do not edit manually."
+                echo "BORG_PASSCOMMAND=${BORG_PASSCOMMAND}"
+            } > "$env_file"
+            chmod 600 "$env_file"
+            env_line="EnvironmentFile=${env_file}"
+            wrote_env_file=true
+        else
+            printf 'BORG_PASSCOMMAND=%s\n' "${BORG_PASSCOMMAND}" >> "$env_file"
+        fi
+    fi
+    if [[ -n "${SSH_AUTH_SOCK:-}" ]]; then
+        if [[ "$wrote_env_file" == "false" ]]; then
+            mkdir -p "$env_dir"
+            chmod 700 "$env_dir"
+            {
+                echo "# copycrow — environment for automatic backups"
+                echo "# Auto-generated. Do not edit manually."
+                echo "SSH_AUTH_SOCK=${SSH_AUTH_SOCK}"
+            } > "$env_file"
+            chmod 600 "$env_file"
+            env_line="EnvironmentFile=${env_file}"
+            wrote_env_file=true
+        else
+            printf 'SSH_AUTH_SOCK=%s\n' "${SSH_AUTH_SOCK}" >> "$env_file"
+        fi
+    fi
+
+    cat > "${SYSTEMD_USER_DIR}/${timer_name}.service" << EOF
+[Unit]
+Description=copycrow automatic backup - ${section}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${COPYCROW_ROOT}/copycrow.sh auto ${section}
+WorkingDirectory=${COPYCROW_ROOT}
+${env_line}
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=3600
+
+[Install]
+WantedBy=default.target
+EOF
+
+    cat > "${SYSTEMD_USER_DIR}/${timer_name}.timer" << EOF
+[Unit]
+Description=Timer copycrow - ${section} (${schedule})
+
+[Timer]
+OnCalendar=${on_calendar}
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    echo "Generated: ${timer_name}.service + ${timer_name}.timer"
+    echo "  OnCalendar: ${on_calendar}"
+
+    if [[ -z "${BORG_PASSPHRASE:-}" && -z "${BORG_PASSCOMMAND:-}" ]]; then
+        echo "  ⚠  WARNING: Neither BORG_PASSPHRASE nor BORG_PASSCOMMAND is set."
+        echo "     Automatic backups will fail."
+        echo ""
+        echo "     Recommended (via pass):"
+        echo "       sudo apt install pass"
+        echo "       pass insert copycrow/borg"
+        echo "       export BORG_PASSCOMMAND='pass show copycrow/borg'"
+    fi
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# timer_enable
+# Enables a specific timer
+# ───────────────────────────────────────────────────────────────────────────────
+timer_enable() {
+    local section="$1"
+    local timer_name="${TIMER_PREFIX}-${section}"
+
+    systemctl --user daemon-reload
+
+    if systemctl --user enable --now "${timer_name}.timer" 2>/dev/null; then
+        echo "Timer enabled: ${timer_name}"
+    else
+        echo "ERROR: Could not enable ${timer_name}" >&2
+        return 1
+    fi
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# timer_disable
+# Disables a specific timer
+# ───────────────────────────────────────────────────────────────────────────────
+timer_disable() {
+    local section="$1"
+    local timer_name="${TIMER_PREFIX}-${section}"
+
+    systemctl --user stop "${timer_name}.timer" 2>/dev/null || true
+    systemctl --user disable "${timer_name}.timer" 2>/dev/null || true
+
+    echo "Timer disabled: ${timer_name}"
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# timer_generate_all
+# Generates and enables timers for all automatic jobs
+# ───────────────────────────────────────────────────────────────────────────────
+timer_generate_all() {
+    if [[ -z "${CONFIG_LOADED:-}" ]]; then
+        source "${COPYCROW_ROOT}/src/config-parser.sh"
+        if config_load; then
+            CONFIG_LOADED="1"
+        else
+            echo "ERROR: Could not load configuration" >&2
+            return 1
+        fi
+    fi
+
+    local auto_jobs
+    auto_jobs=$(config_get_auto_jobs)
+
+    if [[ -z "$auto_jobs" ]]; then
+        echo "No jobs with type=automatic found to install timers"
+        return 0
+    fi
+
+    echo "Generating timers for automatic jobs..."
+
+    while IFS= read -r section; do
+        [[ -z "$section" ]] && continue
+        timer_generate "$section"
+        timer_enable "$section"
+    done <<< "$auto_jobs"
+
+    _timer_cleanup_orphans "$auto_jobs"
+
+    echo ""
+    echo "Timers installed. Verify with:"
+    echo "  systemctl --user list-timers 'copycrow-*'"
+    echo ""
+    echo "NOTE: User timers only run when a login session is active."
+    echo "For backups without login, run: loginctl enable-linger"
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# _timer_cleanup_orphans
+# Removes timers for jobs that no longer exist in the configuration
+# ───────────────────────────────────────────────────────────────────────────────
+_timer_cleanup_orphans() {
+    local active_jobs="$1"
+
+    shopt -s nullglob
+    local timer_files=("${SYSTEMD_USER_DIR}/${TIMER_PREFIX}-"*.timer)
+    shopt -u nullglob
+
+    local timer_file
+    for timer_file in "${timer_files[@]}"; do
+        [[ -f "$timer_file" ]] || continue
+
+        local basename
+        basename=$(basename "$timer_file" .timer)
+
+        local job_name="${basename#"${TIMER_PREFIX}"-}"
+
+        local found=false
+        local job
+        while IFS= read -r job; do
+            if [[ "$job" == "$job_name" ]]; then
+                found=true
+                break
+            fi
+        done <<< "$active_jobs"
+
+        if [[ "$found" == "false" ]]; then
+            echo "  Cleaning up orphan timer: ${basename}"
+            systemctl --user stop "${basename}.timer" 2>/dev/null || true
+            systemctl --user disable "${basename}.timer" 2>/dev/null || true
+            rm -f "$timer_file"
+            rm -f "${SYSTEMD_USER_DIR}/${basename}.service"
+        fi
+    done
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# timer_remove
+# Removes a timer's files
+# ───────────────────────────────────────────────────────────────────────────────
+timer_remove() {
+    local section="$1"
+    local timer_name="${TIMER_PREFIX}-${section}"
+
+    systemctl --user stop "${timer_name}.timer" 2>/dev/null || true
+    systemctl --user disable "${timer_name}.timer" 2>/dev/null || true
+
+    rm -f "${SYSTEMD_USER_DIR}/${timer_name}.service"
+    rm -f "${SYSTEMD_USER_DIR}/${timer_name}.timer"
+
+    echo "Timer removed: ${timer_name}"
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# timer_remove_all
+# Removes all copycrow timers
+# ───────────────────────────────────────────────────────────────────────────────
+timer_remove_all() {
+    shopt -s nullglob
+    local timer_files=("${SYSTEMD_USER_DIR}/${TIMER_PREFIX}-"*.timer)
+    shopt -u nullglob
+
+    if [[ ! -f "${timer_files[0]:-}" ]]; then
+        echo "No copycrow timers to remove"
+        return 0
+    fi
+
+    echo "Removing copycrow timers..."
+
+    local timer_file
+    for timer_file in "${timer_files[@]}"; do
+        [[ -f "$timer_file" ]] || continue
+        local name
+        name=$(basename "$timer_file" .timer)
+
+        systemctl --user stop "${name}.timer" 2>/dev/null || true
+        systemctl --user disable "${name}.timer" 2>/dev/null || true
+
+        rm -f "$timer_file"
+        rm -f "${SYSTEMD_USER_DIR}/${name}.service"
+
+        echo "  Removed: ${name}"
+    done
+
+    systemctl --user daemon-reload
+    echo ""
+    echo "All copycrow timers have been removed"
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# timer_list
+# Lists all active copycrow timers
+# ───────────────────────────────────────────────────────────────────────────────
+timer_list() {
+    echo "copycrow timers:"
+    echo "═════════════════"
+
+    local timers
+    timers=$(systemctl --user list-timers 'copycrow-*' --no-pager 2>/dev/null || true)
+
+    if echo "$timers" | grep -q "copycrow-"; then
+        echo "$timers"
+    else
+        echo "No timers installed"
+    fi
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# timer_status
+# Shows detailed status of a timer
+# ───────────────────────────────────────────────────────────────────────────────
+timer_status() {
+    local section="$1"
+    local timer_name="${TIMER_PREFIX}-${section}"
+
+    echo "Timer: ${timer_name}"
+    echo "════════════════════"
+
+    systemctl --user status "${timer_name}.timer" 2>/dev/null || echo "Not found"
+
+    echo ""
+    echo "Last executed service:"
+    systemctl --user status "${timer_name}.service" 2>/dev/null || echo "Not found"
+}

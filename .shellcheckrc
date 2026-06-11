@@ -1,0 +1,10 @@
+# ShellCheck configuration
+# https://github.com/koalaman/shellcheck/blob/master/shellcheck.hs
+
+# SC2155: Declare and assign separately to avoid masking return values.
+# Common in bash utility code and not a real bug.
+disable=SC2155
+
+# SC2089: Use braces on variable expansion in array subscripts.
+# False positive in many bash versions.
+disable=SC2089

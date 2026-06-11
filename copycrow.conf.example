@@ -1,0 +1,88 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# copycrow — Example configuration file
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Instructions:
+#   1. Copy this file:  cp copycrow.conf.example copycrow.conf
+#   2. Edit copycrow.conf with your real values
+#   3. Make sure SSH hosts are configured in ~/.ssh/config
+#   4. Set BORG_PASSPHRASE: export BORG_PASSPHRASE='your-secret-phrase'
+#
+# SSH host format in ~/.ssh/config:
+#
+#   Host nas-backup
+#       HostName 1xx.1xx.1.1xx
+#       User backupuser
+#       Port 22
+#       IdentityFile ~/.ssh/id_ed25519
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ───────────────────────────────────────────────────────────────────────────────
+# GLOBAL CONFIGURATION
+# Applies to all jobs that don't define their own value
+# ───────────────────────────────────────────────────────────────────────────────
+[global]
+
+# Default retention policy
+retention_default = --keep-daily 7 --keep-weekly 4 --keep-monthly 6
+
+# Default compression (lz4, zstd, zlib, lzma, none)
+compression = lz4
+
+# Prefixes for classifying automatic vs manual backups
+auto_prefix = auto-
+manual_prefix = manual-
+
+# Temporary extraction directory (relative to project)
+mount_dir = .mnt
+
+# Log directory (relative to project)
+logs_dir = logs
+
+# ───────────────────────────────────────────────────────────────────────────────
+# JOBS — Each [name] section defines a backup task
+#
+# Available variables:
+#   type        = automatic | manual
+#   sources     = space-separated paths (e.g. /home /etc /var/log)
+#   host        = SSH alias configured in ~/.ssh/config ("local" for local destinations)
+#   remote_path = path of the Borg repository on the server
+#   schedule    = daily | weekly | monthly | minutesHH:MM (for automatic jobs only)
+#   retention   = specific retention policy (overrides global)
+#   compression = compression algorithm (overrides global)
+# ───────────────────────────────────────────────────────────────────────────────
+
+# Daily backup of essential directories
+[daily_job]
+type = automatic
+sources = /home /etc
+host = nas-backup
+remote_path = /backups/copycrow/daily
+schedule = daily
+retention = --keep-daily 7 --keep-weekly 4
+
+# Weekly backup with longer retention
+[weekly_job]
+type = automatic
+sources = /home /var/log
+host = nas-backup
+remote_path = /backups/copycrow/weekly
+schedule = weekly
+retention = --keep-weekly 4 --keep-monthly 6
+
+# Manual backup of a specific project
+[project_job]
+type = manual
+sources = /home/user/projects
+host = nas-backup
+remote_path = /backups/copycrow/projects
+retention = --keep-daily 30
+
+# Local backup (no SSH) to an external disk
+[local_job]
+type = manual
+sources = /home/user/documents
+host = local
+remote_path = /mnt/external-backup/copycrow
+retention = --keep-daily 14 --keep-weekly 8

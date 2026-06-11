@@ -1,0 +1,288 @@
+# CopyCrow
+
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/morphilab/copycrow)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Bash](https://img.shields.io/badge/bash-4%2B-orange.svg)](https://www.gnu.org/software/bash/)
+[![Tests](https://img.shields.io/badge/tests-34%2F34%20passing-brightgreen.svg)](tests/)
+[![ShellCheck](https://img.shields.io/badge/shellcheck-0%20issues-brightgreen.svg)](.shellcheckrc)
+
+Automated and manual backup system based on **Borg Backup** with a terminal interface (TUI) and native **systemd** timers.
+
+> 100% Bash. Zero runtime dependencies beyond the standard GNU/Linux ecosystem.
+
+**Developer:** [morphilab](https://github.com/morphilab)
+
+## Features
+
+- **Manual and automatic backups** — local or remote via SSH
+- **Client-side encryption** with Borg (`repokey`)
+- **Deduplication** — only changes between backups are stored
+- **Configurable retention** per job (daily, weekly, monthly)
+- **TUI interface** with `whiptail` for browsing and extracting backups
+- **Native automation** with `systemd --user timers` (no custom daemon)
+- **Detailed JSON logs** with timestamps, exit codes, and executed commands
+- **No credentials in code** — uses the system's `~/.ssh/config`
+- **File locking** — prevents concurrent executions of the same job
+- **Signal trapping** — automatic cleanup on Ctrl+C / SIGTERM
+- **Config validation** — anti command-injection on `.conf` values
+- **Dry-run mode** — `./copycrow.sh dryrun <job>` simulates without writing
+
+## ⚠️ AI Disclosure / Divulgación de IA
+
+**English:**  
+This project was developed with assistance from artificial intelligence tools. Given the automated nature of some components, users are advised to review and test the code independently before integrating it into their own systems.
+
+**Español:**  
+Este proyecto fue desarrollado con asistencia de herramientas de inteligencia artificial. Dada la naturaleza automatizada de algunos componentes, se recomienda que los usuarios revisen y prueben el código independientemente antes de integrarlo en sus propios sistemas.
+## Requirements
+
+| Dependency  | Installation                          |
+|-------------|---------------------------------------|
+| `borgbackup` | `sudo apt install borgbackup`        |
+| `whiptail`  | `sudo apt install whiptail`          |
+| `bash` 4+   | Included in Ubuntu/Debian            |
+| `systemd`   | Included in Ubuntu/Debian            |
+| `pass` (recommended) | `sudo apt install pass`       |
+
+## Installation
+
+```bash
+git clone https://github.com/morphilab/copycrow.git
+cd copycrow
+./copycrow.sh init
+```
+
+This creates `copycrow.conf` (your configuration) from the example.
+
+## Configuration
+
+### 1. Configure SSH (remote backups only)
+
+Create a dedicated key and configure two aliases:
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/copycrow_server -N "" -C "copycrow"
+ssh-copy-id -i ~/.ssh/copycrow_server.pub user@1xx.1xx.1.1xx
+```
+
+Edit `~/.ssh/config`:
+
+```
+Host nas-backup
+    HostName 1xx.1xx.1.1xx
+    User backupuser
+    IdentityFile ~/.ssh/id_ed25519          # your daily key
+
+Host nas-backup-borg
+    HostName 1xx.1xx.1.1xx
+    User backupuser
+    IdentityFile ~/.ssh/copycrow_server     # dedicated key without passphrase
+```
+
+In copycrow.conf use `host = nas-backup-borg`. See the [Security](#security) section.
+
+### 2. Configure Borg passphrase
+
+```bash
+sudo apt install pass
+gpg --gen-key                              # generate GPG key
+pass init "your-gpg-id"                    # initialize pass
+pass insert copycrow/borg                  # store passphrase
+export BORG_PASSCOMMAND="pass show copycrow/borg"
+```
+
+Add to `~/.bashrc` for persistence.
+
+### 3. Edit `copycrow.conf`
+
+```conf
+[global]
+retention_default = --keep-daily 7 --keep-weekly 4 --keep-monthly 6
+compression = lz4
+mount_dir = .mnt
+logs_dir = logs
+
+[daily_job]
+type = automatic
+sources = /home /etc
+host = nas-backup-borg
+remote_path = /backups/copycrow/daily
+schedule = daily
+retention = --keep-daily 7 --keep-weekly 4
+```
+
+## Security
+
+### Dedicated SSH key for backups
+
+Create a key **without a passphrase** for automation while keeping your daily key with a passphrase. Use two SSH aliases to the same server:
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/copycrow_server -N "" -C "copycrow"
+ssh-copy-id -i ~/.ssh/copycrow_server.pub user@server
+```
+
+In `~/.ssh/config`:
+
+```
+Host my-server
+    HostName 1xx.1xx.1.1xx
+    User user
+    IdentityFile ~/.ssh/id_ed25519          # daily key with passphrase
+
+Host my-server-borg
+    HostName 1xx.1xx.1.1xx
+    User user
+    IdentityFile ~/.ssh/copycrow_server     # dedicated key without passphrase
+```
+
+In `copycrow.conf` use `host = my-server-borg`.
+
+### Restrict key on the server (recommended)
+
+In the server's `~/.ssh/authorized_keys`, restrict the key to only run borg:
+
+```
+command="borg serve --restrict-to-path /path/backups",no-port-forwarding,no-pty ssh-ed25519 AAA...
+```
+
+### Borg passphrase with `pass` (recommended)
+
+`pass` encrypts the passphrase with GPG. Avoids plaintext in `~/.bashrc`:
+
+```bash
+sudo apt install pass
+gpg --gen-key                              # generate GPG key
+pass init "your-gpg-id"                    # initialize
+pass insert copycrow/borg                  # store passphrase
+export BORG_PASSCOMMAND="pass show copycrow/borg"
+```
+
+Add to `~/.bashrc` for persistence. Copycrow propagates `BORG_PASSCOMMAND` to timers automatically.
+
+### ssh-agent for SSH keys with passphrase
+
+```bash
+eval "$(ssh-agent -s)"
+ssh-add ~/.ssh/id_ed25519
+```
+
+## Usage
+
+```bash
+./copycrow.sh                       # Open interactive menu (TUI)
+./copycrow.sh init                  # Initial setup
+./copycrow.sh backup <job>          # Manual backup of a job
+./copycrow.sh auto <job>            # Automatic backup (used by timers)
+./copycrow.sh dryrun <job>          # Simulate backup (writes nothing)
+./copycrow.sh list [job]            # List backups
+./copycrow.sh open <host> <arch>    # Extract and open container
+./copycrow.sh migrate               # Convert legacy config to English v1.0.0
+./copycrow.sh install               # Install systemd timers
+./copycrow.sh uninstall             # Remove timers
+./copycrow.sh status                # System status
+./copycrow.sh help                  # Help
+```
+
+## Project Structure
+
+```
+copycrow/
+├── copycrow.sh              ← entry point
+├── copycrow.conf            ← your config (gitignored)
+├── copycrow.conf.example    ← example configuration
+├── README.md
+├── LICENSE
+├── CHANGELOG.md
+├── SECURITY.md
+├── VERSION
+├── .gitignore
+├── .shellcheckrc
+├── src/
+│   ├── config-parser.sh     ← INI parser + validation
+│   ├── safety.sh            ← traps, locks, cleanup
+│   ├── backup-core.sh       ← Borg wrapper + JSON logs
+│   ├── timer-generator.sh   ← systemd timers
+│   └── tui.sh               ← whiptail menus
+├── tests/                   ← bats-core tests
+│   ├── config-parser.bats
+│   └── safety.bats
+├── .mnt/                    ← temporary extraction
+├── .locks/                  ← mutual exclusion locks
+└── logs/                    ← daily JSON logs
+```
+
+## Tests
+
+```bash
+# Requires: bats-core (https://github.com/bats-core/bats-core)
+sudo apt install bats
+bats tests/
+```
+
+## Linting
+
+```bash
+shellcheck -x copycrow.sh src/*.sh
+```
+
+## Automatic Timers
+
+```bash
+./copycrow.sh install
+```
+
+This creates `systemd --user` timers for all jobs with `type=automatic`.
+
+**Important:** User timers only run when a login session is active. For always-on execution (even without login):
+
+```bash
+loginctl enable-linger
+```
+
+## Troubleshooting
+
+**"Permission denied (publickey)"**
+- Verify `~/.ssh/config` has the correct `IdentityFile` for that host
+- If using a key with a passphrase, unlock it with `ssh-add`
+- Test the key on the server: `ssh user@host "echo ok"`
+
+**"Is borg working on the server?"**
+Borg is not installed on the remote server:
+```bash
+ssh host "sudo apt install borgbackup"
+```
+
+**"missing_passphrase" (in automatic timers)**
+You need `BORG_PASSCOMMAND` configured. See the [Security](#security) section.
+
+**"BORG_PASSPHRASE is not set"**
+Configure the passphrase. Recommended: use `pass` + `BORG_PASSCOMMAND` (see [Security](#security)).
+
+**"Repository does not exist"**
+The repo is initialized automatically on the first backup. If it fails, check:
+- SSH connection to the host: `ssh host "echo ok"`
+- Borg installed on the remote server
+- Write permissions on `remote_path`
+
+**"copycrow.conf not found"**
+```bash
+./copycrow.sh init
+```
+
+**Timers not running**
+```bash
+systemctl --user list-timers 'copycrow-*'
+loginctl enable-linger
+```
+
+**"Unknown config keys after upgrading?"**
+If you upgraded from an older version with Spanish config keys:
+```bash
+./copycrow.sh migrate    # Converts config to English v1.0.0 format
+```
+A backup is saved as `copycrow.conf.bak`.
+
+## License
+
+MIT — See `LICENSE` file.
