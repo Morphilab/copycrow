@@ -3,7 +3,7 @@
 [![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](https://github.com/morphilab/copycrow)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Bash](https://img.shields.io/badge/bash-4%2B-orange.svg)](https://www.gnu.org/software/bash/)
-[![Tests](https://img.shields.io/badge/tests-86%2F86%20passing-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-99%2F99%20passing-brightgreen.svg)](tests/)
 [![ShellCheck](https://img.shields.io/badge/shellcheck-0%20issues-brightgreen.svg)](.shellcheckrc)
 
 Automated and manual backup system based on **Borg Backup** with a terminal interface (TUI) and native **systemd** timers.
@@ -216,7 +216,9 @@ copycrow/
 │   ├── cli.bats
 │   ├── config-parser.bats
 │   ├── safety.bats
-│   └── timer-generator.bats
+│   ├── timer-generator.bats
+│   ├── tui.bats
+│   └── integration-extract.bats
 ├── .mnt/                    ← temporary extraction
 ├── .locks/                  ← mutual exclusion locks
 └── logs/                    ← daily JSON logs

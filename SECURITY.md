@@ -29,9 +29,9 @@ copycrow is designed with the following principles:
 
 4. **Encryption at rest** — Borg repositories use `repokey` (key derived from passphrase) by default.
 
-5. **Safe restores** — extracted archives require a sanitized archive name (charset-restricted, no traversal) and the target directory is resolved with `realpath` and contained inside the project mount directory; extractions run with `umask 077`.
+5. **Safe restores** — extracted archives require a sanitized archive name (charset-restricted, no traversal) and the target directory is resolved with `realpath` and contained inside the project mount directory. Extraction runs in a hardened context (`umask 077` plus a post-extract `chmod -R go-rwx`), so archived files with permissive modes never become group/world readable.
 
-6. **Concurrent-safe** — job locks are created atomically (create-fail-if-exists), so two runs of the same job can never interleave.
+6. **Concurrent-safe** — job locking uses kernel `flock`: the lock lives as long as the holder's file descriptor, so it is released by the OS even if the process crashes, and no two runs of the same job can interleave (verified by concurrency stress tests).
 
 7. **User isolation** — timers use `systemd --user`, no root elevation.
 
