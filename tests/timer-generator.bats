@@ -32,6 +32,7 @@ EOF
 }
 
 teardown() {
+    unset XDG_CONFIG_HOME
     rm -rf "$COPYCROW_TEST_SANDBOX"
 }
 
@@ -47,7 +48,7 @@ teardown() {
     [ "$status" -eq 0 ]
     [ -f "$HOME/.config/systemd/user/copycrow-timer_job.service" ]
     [ -f "$HOME/.config/systemd/user/copycrow-timer_job.timer" ]
-    grep -q "ExecStart=${COPYCROW_ROOT}/copycrow.sh auto timer_job" \
+    grep -qF "ExecStart=\"${COPYCROW_ROOT}/copycrow.sh\" auto timer_job" \
         "$HOME/.config/systemd/user/copycrow-timer_job.service"
 }
 
@@ -99,10 +100,62 @@ EOF
         "$HOME/.config/systemd/user/copycrow-timer_job.service"
 }
 
+@test "timer_generate: propagates non-default COPYCROW_CONF via Environment=" {
+    export COPYCROW_CONF="/custom/location/my.conf"
+    run timer_generate "timer_job"
+    [ "$status" -eq 0 ]
+    grep -qF "Environment=\"COPYCROW_CONF=/custom/location/my.conf\"" \
+        "$HOME/.config/systemd/user/copycrow-timer_job.service"
+    unset COPYCROW_CONF
+}
+
+@test "timer_generate: omits Environment=COPYCROW_CONF when default path" {
+    unset COPYCROW_CONF
+    run timer_generate "timer_job"
+    ! grep -q "Environment=COPYCROW_CONF" \
+        "$HOME/.config/systemd/user/copycrow-timer_job.service"
+}
+
+@test "timer_generate: never persists ephemeral SSH_AUTH_SOCK" {
+    export SSH_AUTH_SOCK="/run/user/1000/agent-42/socket"
+    run timer_generate "timer_job"
+    [ "$status" -eq 0 ]
+    # The socket path changes between sessions: baking it into the env file
+    # guarantees stale-agent failures after a reboot.
+    if [ -f "$HOME/.config/copycrow/borg.env" ]; then
+        ! grep -q "SSH_AUTH_SOCK" "$HOME/.config/copycrow/borg.env"
+    fi
+}
+
 @test "timer_remove_all: deletes the credential env file" {
     mkdir -p "$HOME/.config/copycrow"
     : > "$HOME/.config/copycrow/borg.env"
     run timer_remove_all
     [ "$status" -eq 0 ]
     [ ! -f "$HOME/.config/copycrow/borg.env" ]
+}
+
+@test "timer_generate: honors XDG_CONFIG_HOME for user unit directory" {
+    export XDG_CONFIG_HOME="${COPYCROW_TEST_SANDBOX}/xdg"
+    mkdir -p "$XDG_CONFIG_HOME"
+
+    run timer_generate "timer_job"
+    [ "$status" -eq 0 ]
+
+    # Las units deben caer bajo el XDG del usuario, no en $HOME/.config fijo.
+    [ -f "${XDG_CONFIG_HOME}/systemd/user/copycrow-timer_job.service" ]
+    [ ! -e "${HOME}/.config/systemd/user/copycrow-timer_job.service" ]
+}
+
+@test "timer_generate: quotes Environment=COPYCROW_CONF value (spaces/%-safe)" {
+    export COPYCROW_CONF="${COPYCROW_TEST_SANDBOX}/my conf.conf"
+    : > "$COPYCROW_CONF"
+    export BORG_PASSCOMMAND="pass show copycrow/borg"
+
+    run timer_generate "timer_job"
+    [ "$status" -eq 0 ]
+
+    local unit
+    unit="$(printf '%s/systemd/user/copycrow-timer_job.service' "${XDG_CONFIG_HOME:-$HOME/.config}")"
+    grep -qF 'Environment="COPYCROW_CONF=' "$unit"
 }

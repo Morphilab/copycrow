@@ -26,7 +26,10 @@ _cleanup() {
         fi
     done
 
-    if [[ -n "${COPYCROW_LOCK_FILE:-}" ]] && [[ -f "${COPYCROW_LOCK_FILE}" ]]; then
+    # Release job lock (unlocks kernel flock, closes fd, removes file).
+    if declare -F safety_lock_release >/dev/null 2>&1; then
+        safety_lock_release
+    elif [[ -n "${COPYCROW_LOCK_FILE:-}" ]] && [[ -f "${COPYCROW_LOCK_FILE}" ]]; then
         rm -f "${COPYCROW_LOCK_FILE}" 2>/dev/null || true
     fi
 
@@ -54,38 +57,52 @@ safety_add_temp() {
 
 # ───────────────────────────────────────────────────────────────────────────────
 # safety_lock_acquire
-# Acquires an exclusive lock for a job (non-blocking).
-# Uses atomic create-fail-if-exists (noclobber) to avoid the check-then-create
-# TOCTOU race between concurrent invocations of the same job.
+# Acquires an exclusive lock for a job (non-blocking) via flock(1).
+# The lock lives as long as the file descriptor is open, so the KERNEL
+# releases it when the holder dies — there are no stale locks to recover and
+# no check-then-act window: flock is atomic. The PID written inside the file
+# is diagnostic only.
 # Returns 0 if acquired, 1 if already locked.
+# Requires: flock (util-linux, present on all supported Debian/Ubuntu targets).
 # ───────────────────────────────────────────────────────────────────────────────
 safety_lock_acquire() {
     local job="$1"
     local lock_file="${LOCK_DIR}/copycrow-${job}.lock"
 
-    if ! ( set -o noclobber; printf '%s\n' "$$" > "$lock_file" ) 2>/dev/null; then
-        # Lock file exists: is the holder still alive?
-        local pid=""
-        pid=$(cat "$lock_file" 2>/dev/null || true)
-        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-            return 1
-        fi
-        # Stale lock: remove it and retry ONCE atomically.
-        rm -f "$lock_file" 2>/dev/null || true
-        if ! ( set -o noclobber; printf '%s\n' "$$" > "$lock_file" ) 2>/dev/null; then
-            return 1
-        fi
+    # Dynamic fd allocation (bash 4.1+): fd number lands in COPYCROW_LOCK_FD.
+    # Opened read-write WITHOUT truncation so a concurrent holder's content
+    # stays intact; children inherit the fd, keeping the lock for the whole
+    # backup duration even across exec'd tools.
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "ERROR: flock not found (util-linux). Cannot lock job '$job'." >&2
+        return 1
     fi
 
+    : >> "$lock_file" 2>/dev/null || return 1
+    exec {COPYCROW_LOCK_FD}>> "$lock_file" || return 1
+
+    if ! flock -n "${COPYCROW_LOCK_FD}" 2>/dev/null; then
+        exec {COPYCROW_LOCK_FD}>&-
+        unset COPYCROW_LOCK_FD
+        return 1
+    fi
+
+    # Diagnostic only — never used for liveness decisions.
+    printf '%s\n' "$$" > "$lock_file"
     COPYCROW_LOCK_FILE="$lock_file"
     return 0
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
 # safety_lock_release
-# Releases the current lock
+# Releases the current lock (unlocks, closes the fd, removes the file)
 # ───────────────────────────────────────────────────────────────────────────────
 safety_lock_release() {
+    if [[ -n "${COPYCROW_LOCK_FD:-}" ]]; then
+        flock -u "${COPYCROW_LOCK_FD}" 2>/dev/null || true
+        exec {COPYCROW_LOCK_FD}>&- 2>/dev/null || true
+        unset COPYCROW_LOCK_FD
+    fi
     if [[ -n "${COPYCROW_LOCK_FILE:-}" ]] && [[ -f "${COPYCROW_LOCK_FILE}" ]]; then
         rm -f "${COPYCROW_LOCK_FILE}"
         unset COPYCROW_LOCK_FILE
@@ -105,8 +122,10 @@ safety_lock_run() {
         return 1
     fi
 
-    "$@"
-    local rc=$?
+    # Convention-compliant capture: the previous `cmd; rc=$?` form was dead
+    # code under set -e (release depended on the EXIT trap, not design).
+    local rc=0
+    "$@" || rc=$?
     safety_lock_release
     return $rc
 }

@@ -23,7 +23,7 @@ copycrow is designed with the following principles:
    - The system's `~/.ssh/config` for SSH
    - `pass` (GPG-encrypted) for the Borg passphrase, consumed via `BORG_PASSCOMMAND`
 
-2. **Secrets never touch disk** — `BORG_PASSPHRASE` is **never** written anywhere by copycrow. Automation persists only non-secret data (`BORG_PASSCOMMAND` command string, `SSH_AUTH_SOCK` socket path) in `~/.config/copycrow/borg.env` with `0600` permissions inside a `0700` directory. The file is removed by `./copycrow.sh uninstall`.
+2. **Secrets never touch disk** — `BORG_PASSPHRASE` is **never** written anywhere by copycrow. Automation persists only non-secret data (the `BORG_PASSCOMMAND` command string) in `~/.config/copycrow/borg.env` with `0600` permissions inside a `0700` directory. The file is removed by `./copycrow.sh uninstall`. For SSH keys protected by a passphrase, expose an agent to the user systemd session instead (e.g. a user-level `ssh-agent.service` or `AddKeysToAgent yes` in `~/.ssh/config`); the ephemeral `SSH_AUTH_SOCK` path is deliberately not persisted because it goes stale after a reboot.
 
 3. **Input validation, enforced end-to-end** — every configuration value is validated while loading (fail-fast): shell metacharacters are rejected, path traversal is blocked, `host` must be a well-formed SSH alias **without a leading dash** (blocking SSH option injection such as `-oProxyCommand=`), `retention` is restricted to `borg prune --keep-*` flag/number pairs, and `compression` / `type` / `schedule` are whitelist-checked. Required fields (`type`, `sources`, `host`, `remote_path`) are verified before any command performs work.
 

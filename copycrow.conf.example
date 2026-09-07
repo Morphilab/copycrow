@@ -6,7 +6,9 @@
 #   1. Copy this file:  cp copycrow.conf.example copycrow.conf
 #   2. Edit copycrow.conf with your real values
 #   3. Make sure SSH hosts are configured in ~/.ssh/config
-#   4. Set BORG_PASSPHRASE: export BORG_PASSPHRASE='your-secret-phrase'
+#   4. Store the Borg passphrase with pass (timers CANNOT answer prompts):
+#      sudo apt install pass && pass insert copycrow/borg
+#      export BORG_PASSCOMMAND='pass show copycrow/borg'
 #
 # SSH host format in ~/.ssh/config:
 #
@@ -34,7 +36,8 @@ compression = lz4
 auto_prefix = auto-
 manual_prefix = manual-
 
-# Temporary extraction directory (relative to project)
+# Temporary extraction directory (relative to project; MUST stay relative:
+# extractions are contained under it). logs_dir accepts absolute paths.
 mount_dir = .mnt
 
 # Log directory (relative to project)

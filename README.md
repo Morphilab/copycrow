@@ -1,9 +1,9 @@
 # CopyCrow
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/morphilab/copycrow)
+[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](https://github.com/morphilab/copycrow)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Bash](https://img.shields.io/badge/bash-4%2B-orange.svg)](https://www.gnu.org/software/bash/)
-[![Tests](https://img.shields.io/badge/tests-69%2F69%20passing-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-86%2F86%20passing-brightgreen.svg)](tests/)
 [![ShellCheck](https://img.shields.io/badge/shellcheck-0%20issues-brightgreen.svg)](.shellcheckrc)
 
 Automated and manual backup system based on **Borg Backup** with a terminal interface (TUI) and native **systemd** timers.
@@ -212,8 +212,11 @@ copycrow/
 │   ├── timer-generator.sh   ← systemd timers
 │   └── tui.sh               ← whiptail menus
 ├── tests/                   ← bats-core tests
+│   ├── backup-core.bats
+│   ├── cli.bats
 │   ├── config-parser.bats
-│   └── safety.bats
+│   ├── safety.bats
+│   └── timer-generator.bats
 ├── .mnt/                    ← temporary extraction
 ├── .locks/                  ← mutual exclusion locks
 └── logs/                    ← daily JSON logs
@@ -282,6 +285,13 @@ The repo is initialized automatically on the first backup. If it fails, check:
 systemctl --user list-timers 'copycrow-*'
 loginctl enable-linger
 ```
+
+**SSH key with passphrase fails in timers**
+Timers run outside your login session: there is no `ssh-agent` and the ephemeral
+`SSH_AUTH_SOCK` is not persisted (it goes stale after a reboot). Options:
+- Use a dedicated passphrase-less key for backups (see [Security](#security)), or
+- Expose an agent to the user systemd session (a user-level `ssh-agent.service`,
+  plus `AddKeysToAgent yes` in `~/.ssh/config`).
 
 **"Unknown config keys after upgrading?"**
 If you upgraded from an older version with Spanish config keys:

@@ -88,3 +88,52 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"Unknown command"* ]]
 }
+
+@test "onboarding: setup texts never recommend exporting BORG_PASSPHRASE" {
+    # Timers cannot answer prompts: recommending `export BORG_PASSPHRASE` as a
+    # setup step sets users up for failure. Only BORG_PASSCOMMAND may appear.
+    ! grep -rn "export BORG_PASSPHRASE" \
+        "${COPYCROW_ROOT}/copycrow.sh" \
+        "${COPYCROW_ROOT}/copycrow.conf.example"
+    grep -q "BORG_PASSCOMMAND" "${COPYCROW_ROOT}/copycrow.conf.example"
+}
+
+@test "--version: prints VERSION file content" {
+    run "${COPYCROW_ROOT}/copycrow.sh" --version
+    [ "$status" -eq 0 ]
+    [ "$output" == "$(cat "${COPYCROW_ROOT}/VERSION")" ]
+
+    run "${COPYCROW_ROOT}/copycrow.sh" -V
+    [ "$status" -eq 0 ]
+    [ "$output" == "$(cat "${COPYCROW_ROOT}/VERSION")" ]
+}
+
+@test "backup: rejects extra arguments" {
+    run "${COPYCROW_ROOT}/copycrow.sh" backup dry_job extra_arg
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Too many arguments"* ]]
+}
+
+@test "open: rejects more than two arguments" {
+    run "${COPYCROW_ROOT}/copycrow.sh" open host arch surplus
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Too many arguments"* ]]
+}
+
+@test "arity: no-operand commands reject surplus arguments" {
+    # P2-11: el claim de aridad era selectivo; init/migrate/install/uninstall/
+    # status ignoraban argumentos sobrantes en silencio.
+    local cmd
+    for cmd in status install uninstall init; do
+        run "${COPYCROW_ROOT}/copycrow.sh" "$cmd" SURPLUS_ARG
+        [ "$status" -ne 0 ] || { echo "command '$cmd' accepted surplus"; return 1; }
+        [[ "$output" == *"Too many arguments"* ]] || { echo "'$cmd' wrong message"; return 1; }
+    done
+}
+
+@test "status: honors COPYCROW_CONF override" {
+    # P2-12: cmd_status comprobaba ${COPYCROW_ROOT}/copycrow.conf hardcodeado.
+    run env COPYCROW_CONF="$COPYCROW_CONF" "${COPYCROW_ROOT}/copycrow.sh" status
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"dry_job"* ]]
+}

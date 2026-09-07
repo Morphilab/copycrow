@@ -66,9 +66,12 @@ EOF
     [ "$output" = "/mnt/disk/repo" ]
 }
 
-@test "backup_build_repo_url: remote host builds ssh URL" {
+@test "backup_build_repo_url: remote host builds ABSOLUTE ssh URL (double slash)" {
+    # borg treats ssh://host/path as RELATIVE to the remote home; absolute
+    # requires the double slash (P1-4: validation demands /abs paths, so the
+    # URL must preserve absoluteness).
     run backup_build_repo_url "nas-backup" "/backups/copycrow/daily"
-    [ "$output" = "ssh://nas-backup/backups/copycrow/daily" ]
+    [ "$output" = "ssh://nas-backup//backups/copycrow/daily" ]
 }
 
 @test "backup_safe_archive_name: accepts timestamped archive names" {
@@ -120,10 +123,43 @@ EOF
 
     run backup_get_repo_urls_for_host "nas"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"ssh://nas/backups/daily"* ]]
-    [[ "$output" == *"ssh://nas/backups/weekly"* ]]
-    [[ "$output" != *"ssh://nas/backups/daily"*"ssh://nas/backups/daily"* ]]
+    [[ "$output" == *"ssh://nas//backups/daily"* ]]
+    [[ "$output" == *"ssh://nas//backups/weekly"* ]]
+    [[ "$output" != *"ssh://nas//backups/daily"*"ssh://nas//backups/daily"* ]]
     [[ "$output" != *"/elsewhere"* ]]
+}
+
+@test "backup_list: filters archives by prefix literally (regex metachars in names are safe)" {
+    # Put the stub dir on PATH first (generic stub), then override with a
+    # listing-specific fake.
+    _stub_borg 0
+    cat > "${PATH_STUB_DIR}/borg" << 'STUB'
+#!/usr/bin/env bash
+if [ "$1" = "list" ]; then
+    printf '%s\n' "auto-20260101-000000" "manual-20260101-000000" "auto-(weird)-name" "other"
+fi
+exit 0
+STUB
+    chmod +x "${PATH_STUB_DIR}/borg"
+
+    _load_conf << EOF
+[global]
+logs_dir = ${COPYCROW_TEST_SANDBOX}/logs-sandbox
+auto_prefix = auto-
+manual_prefix = manual-
+
+[list_job]
+type = manual
+sources = /home
+host = local
+remote_path = ${COPYCROW_TEST_SANDBOX}/repo
+EOF
+
+    run backup_list "local" "auto"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"auto-20260101-000000"* ]]
+    [[ "$output" == *"auto-(weird)-name"* ]]
+    [[ "$output" != *"manual-"* ]]
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -163,4 +199,16 @@ EOF
     # `false` produces empty output with code 1 — and the shell SURVIVES.
     [ "$status" -eq 0 ]
     [[ "$output" == "1|"* ]]
+}
+
+@test "_run_capture: registers its tempfile with safety_add_temp (signal-safe cleanup)" {
+    run bash -c '
+        source "'"${COPYCROW_ROOT}"'/src/safety.sh"
+        source "'"${COPYCROW_ROOT}"'/src/backup-core.sh"
+        out=""
+        _run_capture out true || true
+        printf "%s\n" "${TEMP_FILES[@]:-}"
+    '
+    [ "$status" -eq 0 ]
+    [[ "$output" == *copycrow-cap.* ]]
 }

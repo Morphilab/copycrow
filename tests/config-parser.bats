@@ -129,6 +129,24 @@ EOF
     [ "$status" -ne 0 ]
 }
 
+@test "remote_path: must be absolute" {
+    run config_validate_value "remote_path" "backups/daily"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"absolute"* ]]
+
+    run config_validate_value "remote_path" "/backups/daily"
+    [ "$status" -eq 0 ]
+}
+
+@test "mount_dir: must stay relative to project root" {
+    run config_validate_value "mount_dir" ".mnt"
+    [ "$status" -eq 0 ]
+
+    run config_validate_value "mount_dir" "/etc"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"relative"* ]]
+}
+
 @test "config_validate_value: rejects invalid compression" {
     run config_validate_value "compression" "rm -rf"
     [ "$status" -ne 0 ]
@@ -391,6 +409,19 @@ EOF
     [ "$status" -ne 0 ]
 }
 
+@test "prefixes: accept archive-name charset only" {
+    for p in "auto-" "manual_" "snap." "A1-b_c.d"; do
+        run config_validate_value "auto_prefix" "$p"
+        [ "$status" -eq 0 ] || return 1
+    done
+    for bad in "auto(x)" "-lead" "a;b" "x y" 'a$b'; do
+        run config_validate_value "auto_prefix" "$bad"
+        [ "$status" -ne 0 ] || return 1
+    done
+    run config_validate_value "manual_prefix" "auto-(nuevo)"
+    [ "$status" -ne 0 ]
+}
+
 @test "config_load: rejects unknown keys (whitelist)" {
     cat > /tmp/copycrow-test-wl.conf << 'EOF'
 [global]
@@ -403,6 +434,22 @@ EOF
     run config_load /tmp/copycrow-test-wl.conf
     [ "$status" -ne 0 ]
     [[ "$output" == *"unknown key"* ]]
+}
+
+@test "config_load: rejects keys before any section header" {
+    cat > /tmp/copycrow-test-pre.conf << 'EOF'
+type = manual
+sources = /home
+
+[job_a]
+type = manual
+sources = /home
+host = server
+remote_path = /a
+EOF
+    run config_load /tmp/copycrow-test-pre.conf
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"appears before any"* ]]
 }
 
 @test "config_load: fails fast on invalid values (anti-injection active in load)" {
@@ -544,6 +591,30 @@ EOF
     rm -f "$COPYCROW_CONF" "${COPYCROW_CONF}.bak"
 }
 
+@test "config_migrate: migrates values when fixture has NO 'automatico'" {
+    export COPYCROW_CONF="$(mktemp /tmp/copycrow-migrate-XXXXXX.conf)"
+    cat > "$COPYCROW_CONF" << 'EOF'
+[global]
+compresion = lz4
+
+[solo_diario]
+tipo = manual
+origenes = /home
+host = nas
+ruta_remota = /backups/diario
+frecuencia = diario
+EOF
+
+    run config_migrate
+    [ "$status" -eq 0 ]
+
+    config_load "$COPYCROW_CONF"
+    [ "$(config_get_var solo_diario type)" = "manual" ]
+    [ "$(config_get_var solo_diario schedule)" = "daily" ]
+
+    rm -f "$COPYCROW_CONF" "${COPYCROW_CONF}.bak"
+}
+
 @test "config_migrate: reports if already in English" {
     export COPYCROW_CONF="$(mktemp /tmp/copycrow-migrate-XXXXXX.conf)"
     cat > "$COPYCROW_CONF" << 'EOF'
@@ -556,4 +627,77 @@ EOF
     [[ "$output" == *"already in English"* ]]
 
     rm -f "$COPYCROW_CONF" "${COPYCROW_CONF}.bak"
+}
+
+@test "config_migrate: migrates legacy minutesHH:MM schedule value" {
+    export COPYCROW_CONF="$(mktemp /tmp/copycrow-migrate-XXXXXX.conf)"
+    cat > "$COPYCROW_CONF" << 'CONF'
+[job_min]
+tipo = automatic
+origenes = /home
+host = nas
+ruta_remota = /backups/min
+frecuencia = minutos08:30
+CONF
+
+    run config_migrate
+    [ "$status" -eq 0 ]
+
+    # Post-migración la config debe cargar limpia (P0-2: antes quedaba inválida).
+    # Bare call (not `run`): state must survive into this shell for config_get_var.
+    config_load "$COPYCROW_CONF"
+    [ "$?" -eq 0 ]
+    [ "$(config_get_var job_min schedule)" = "minutes08:30" ]
+
+    rm -f "$COPYCROW_CONF" "${COPYCROW_CONF}.bak"
+}
+
+@test "config_load: strips UTF-8 BOM instead of failing with misleading error" {
+    # P1-7: editores de Windows añaden BOM; el parser lo trataba como basura
+    # y fallaba con "key appears before any section".
+    local conf="/tmp/copycrow-bom-$$.conf"
+    printf '\xef\xbb\xbf[job_bom]\ntype = manual\nsources = /home\nhost = server\nremote_path = /a\n' > "$conf"
+    config_load "$conf"
+    [ "$?" -eq 0 ]
+    [ "$(config_get_var job_bom host)" = "server" ]
+    rm -f "$conf"
+}
+
+@test "config_load: a section literally named __duplicate_ignored__ is a normal job" {
+    # P1-8: el centinela interno colisionaba con ese nombre de sección y
+    # descartaba TODAS sus claves → job zombi inservible.
+    local conf="/tmp/copycrow-sent-$$.conf"
+    cat > "$conf" << 'CONF'
+[__duplicate_ignored__]
+type = manual
+sources = /home
+host = server
+remote_path = /a
+CONF
+    config_load "$conf"
+    [ "$?" -eq 0 ]
+    [ "$(config_get_var __duplicate_ignored__ type)" = "manual" ]
+    rm -f "$conf"
+}
+
+@test "config_load: explicit empty mount_dir fails with clear message" {
+    # P2-9a: `mount_dir =` desaparecía en silencio y la extracción degradaba
+    # a la raíz del proyecto. Ahora debe rechazarse con mensaje claro.
+    local conf="/tmp/copycrow-empty-md-$$.conf"
+    printf '[global]\nmount_dir =\n[job_e]\ntype = manual\nsources = /home\nhost = server\nremote_path = /a\n' > "$conf"
+    local out="" rc=0
+    out="$(config_load "$conf" 2>&1)" || rc=$?
+    [ "$rc" -ne 0 ]
+    [[ "$out" == *"must not be empty"* ]]
+    rm -f "$conf"
+}
+
+@test "config_load: explicit empty retention is accepted (falls back to global)" {
+    # Comportamiento legítimo que NO debe romperse al aceptar valores vacíos.
+    local conf="/tmp/copycrow-empty-ret-$$.conf"
+    printf '[global]\nretention_default = --keep-daily 7\n[job_r]\ntype = manual\nsources = /home\nhost = server\nremote_path = /a\nretention =\n' > "$conf"
+    config_load "$conf"
+    [ "$?" -eq 0 ]
+    [ -z "$(config_get_var job_r retention)" ]
+    rm -f "$conf"
 }

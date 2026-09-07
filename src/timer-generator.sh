@@ -8,8 +8,12 @@ set -euo pipefail
 # Project root directory
 COPYCROW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# systemd user directory
-SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
+# systemd user directory (resolved per call: honors XDG_CONFIG_HOME, which
+# systemd itself uses to locate user units — hardcoding $HOME/.config broke
+# installs for users with a custom XDG config home)
+_systemd_user_dir() {
+    printf '%s\n' "${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
+}
 
 # copycrow timer prefix
 TIMER_PREFIX="copycrow"
@@ -54,7 +58,8 @@ timer_generate() {
     local on_calendar
     on_calendar=$(timer_convert_schedule "$schedule")
 
-    mkdir -p "$SYSTEMD_USER_DIR"
+    local sdir; sdir="$(_systemd_user_dir)"
+    mkdir -p "$sdir"
 
     # TimeoutStartSec from config (validated at load: number or 'infinity').
     local timeout_sec
@@ -64,13 +69,15 @@ timer_generate() {
     local env_dir="${HOME}/.config/copycrow"
     local env_file="${env_dir}/borg.env"
     local env_line=""
-    local wrote_env_file=false
 
     # ── SECURITY INVARIANT ────────────────────────────────────────────────────
     # BORG_PASSPHRASE is a SECRET: it is NEVER written to disk.
-    # Only BORG_PASSCOMMAND (a command *string*, not the secret itself) and
-    # SSH_AUTH_SOCK (a socket path) are persisted, in a 0600 file inside a
-    # 0700 directory. The file is removed by `uninstall`.
+    # Only BORG_PASSCOMMAND (a command *string*, not the secret itself) is
+    # persisted, in a 0600 file inside a 0700 directory, removed by `uninstall`.
+    # NOTE: SSH_AUTH_SOCK is deliberately NOT persisted — its path changes
+    # between sessions, so baking it into the env file guarantees stale-agent
+    # failures after a reboot. For keys with a passphrase, expose an agent to
+    # the user systemd session instead (see README troubleshooting).
     # ──────────────────────────────────────────────────────────────────────────
     if [[ -n "${BORG_PASSPHRASE:-}" && -z "${BORG_PASSCOMMAND:-}" ]]; then
         echo "  ⚠  WARNING: BORG_PASSPHRASE detected, but it will NOT be stored on disk."
@@ -95,26 +102,17 @@ timer_generate() {
         } > "$env_file"
         chmod 600 "$env_file"
         env_line="EnvironmentFile=${env_file}"
-        wrote_env_file=true
     fi
 
-    if [[ -n "${SSH_AUTH_SOCK:-}" ]]; then
-        if [[ "$wrote_env_file" == "false" ]]; then
-            mkdir -p "$env_dir"
-            chmod 700 "$env_dir"
-            {
-                echo "# copycrow — environment for automatic backups"
-                echo "# Auto-generated."
-                printf 'SSH_AUTH_SOCK=%s\n' "${SSH_AUTH_SOCK}"
-            } > "$env_file"
-            chmod 600 "$env_file"
-            env_line="EnvironmentFile=${env_file}"
-        else
-            printf 'SSH_AUTH_SOCK=%s\n' "${SSH_AUTH_SOCK}" >> "$env_file"
-        fi
+    # If the config lives outside the default location, bake its path into
+    # the unit: timers must read the SAME conf the user installed from.
+    # Quoted per systemd Environment= syntax so spaces/% stay literal.
+    local conf_env_line=""
+    if [[ -n "${COPYCROW_CONF:-}" && "${COPYCROW_CONF}" != "${COPYCROW_ROOT}/copycrow.conf" ]]; then
+        conf_env_line="Environment=\"COPYCROW_CONF=${COPYCROW_CONF}\""
     fi
 
-    cat > "${SYSTEMD_USER_DIR}/${timer_name}.service" << EOF
+    cat > "${sdir}/${timer_name}.service" << EOF
 [Unit]
 Description=copycrow automatic backup - ${section}
 After=network-online.target
@@ -122,8 +120,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=${COPYCROW_ROOT}/copycrow.sh auto ${section}
+ExecStart="${COPYCROW_ROOT}/copycrow.sh" auto ${section}
 WorkingDirectory=${COPYCROW_ROOT}
+${conf_env_line}
 ${env_line}
 StandardOutput=journal
 StandardError=journal
@@ -133,7 +132,7 @@ TimeoutStartSec=${timeout_sec}
 WantedBy=default.target
 EOF
 
-    cat > "${SYSTEMD_USER_DIR}/${timer_name}.timer" << EOF
+    cat > "${sdir}/${timer_name}.timer" << EOF
 [Unit]
 Description=Timer copycrow - ${section} (${schedule})
 
@@ -217,13 +216,29 @@ timer_generate_all() {
 
     echo "Generating timers for automatic jobs..."
 
+    # Explicit failure tracking: under an exempted errexit context (callers
+    # using the `cmd || rc=$?` pattern) a bare failing statement would NOT
+    # stop the loop, and the function would end up returning 0 with broken
+    # timers installed. Count failures instead of relying on set -e.
+    local failures=0 section
     while IFS= read -r section; do
         [[ -z "$section" ]] && continue
-        timer_generate "$section"
-        timer_enable "$section"
+        if ! timer_generate "$section"; then
+            echo "ERROR: Could not generate units for '$section'" >&2
+            failures=$((failures + 1))
+            continue
+        fi
+        if ! timer_enable "$section"; then
+            failures=$((failures + 1))
+        fi
     done <<< "$auto_jobs"
 
     _timer_cleanup_orphans "$auto_jobs"
+
+    if (( failures > 0 )); then
+        echo "ERROR: ${failures} job(s) could not be fully installed." >&2
+        return 1
+    fi
 
     echo ""
     echo "Timers installed. Verify with:"
@@ -231,6 +246,7 @@ timer_generate_all() {
     echo ""
     echo "NOTE: User timers only run when a login session is active."
     echo "For backups without login, run: loginctl enable-linger"
+    return 0
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -239,9 +255,11 @@ timer_generate_all() {
 # ───────────────────────────────────────────────────────────────────────────────
 _timer_cleanup_orphans() {
     local active_jobs="$1"
+    local sdir
+    sdir="$(_systemd_user_dir)"
 
     shopt -s nullglob
-    local timer_files=("${SYSTEMD_USER_DIR}/${TIMER_PREFIX}-"*.timer)
+    local timer_files=("${sdir}/${TIMER_PREFIX}-"*.timer)
     shopt -u nullglob
 
     local timer_file
@@ -267,7 +285,7 @@ _timer_cleanup_orphans() {
             systemctl --user stop "${basename}.timer" 2>/dev/null || true
             systemctl --user disable "${basename}.timer" 2>/dev/null || true
             rm -f "$timer_file"
-            rm -f "${SYSTEMD_USER_DIR}/${basename}.service"
+            rm -f "${sdir}/${basename}.service"
         fi
     done
 }
@@ -279,12 +297,14 @@ _timer_cleanup_orphans() {
 timer_remove() {
     local section="$1"
     local timer_name="${TIMER_PREFIX}-${section}"
+    local sdir
+    sdir="$(_systemd_user_dir)"
 
     systemctl --user stop "${timer_name}.timer" 2>/dev/null || true
     systemctl --user disable "${timer_name}.timer" 2>/dev/null || true
 
-    rm -f "${SYSTEMD_USER_DIR}/${timer_name}.service"
-    rm -f "${SYSTEMD_USER_DIR}/${timer_name}.timer"
+    rm -f "${sdir}/${timer_name}.service"
+    rm -f "${sdir}/${timer_name}.timer"
 
     echo "Timer removed: ${timer_name}"
 }
@@ -294,13 +314,16 @@ timer_remove() {
 # Removes all copycrow timers
 # ───────────────────────────────────────────────────────────────────────────────
 timer_remove_all() {
+    local sdir
+    sdir="$(_systemd_user_dir)"
+
     # Always clean persisted credentials, even when no timers exist:
     # uninstalling must leave nothing behind.
     rm -f "${HOME}/.config/copycrow/borg.env"
     rmdir "${HOME}/.config/copycrow" 2>/dev/null || true
 
     shopt -s nullglob
-    local timer_files=("${SYSTEMD_USER_DIR}/${TIMER_PREFIX}-"*.timer)
+    local timer_files=("${sdir}/${TIMER_PREFIX}-"*.timer)
     shopt -u nullglob
 
     if [[ ! -f "${timer_files[0]:-}" ]]; then
@@ -320,7 +343,7 @@ timer_remove_all() {
         systemctl --user disable "${name}.timer" 2>/dev/null || true
 
         rm -f "$timer_file"
-        rm -f "${SYSTEMD_USER_DIR}/${name}.service"
+        rm -f "${sdir}/${name}.service"
 
         echo "  Removed: ${name}"
     done

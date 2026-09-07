@@ -55,12 +55,14 @@ tui_main() {
             3>&1 1>&2 2>&3)
 
         case "$option" in
-            1) tui_create_backup ;;
-            2) tui_list_backups ;;
-            3) tui_open_container ;;
-            4) tui_view_status ;;
-            5) tui_manage_timers ;;
-            6) tui_ssh_info ;;
+            # Handlers report failures through dialogs and may return nonzero;
+            # `|| true` keeps the menu loop alive (A4 hardening).
+            1) tui_create_backup || true ;;
+            2) tui_list_backups || true ;;
+            3) tui_open_container || true ;;
+            4) tui_view_status || true ;;
+            5) tui_manage_timers || true ;;
+            6) tui_ssh_info || true ;;
             0|"")
                 clear
                 break
@@ -105,16 +107,18 @@ tui_list_jobs() {
 # Selects a job and creates a backup
 # ───────────────────────────────────────────────────────────────────────────────
 tui_create_backup() {
-    local jobs=""
+    local -a menu_args=()
     local section
 
     for section in $(config_get_sections); do
         local type=$(config_get_var "$section" "type")
         local host=$(config_get_var "$section" "host")
-        jobs+="\"$section\" \"[$type] $host\" "
+        # Array, no quote-string: literal quotes + unquoted expansion fed
+        # whiptail garbled pairs (and an odd count broke the menu entirely).
+        menu_args+=("$section" "[${type}] ${host}")
     done
 
-    if [[ -z "$jobs" ]]; then
+    if [[ ${#menu_args[@]} -eq 0 ]]; then
         whiptail --title "Error" --msgbox "No jobs configured" 8 50
         return 1
     fi
@@ -122,7 +126,7 @@ tui_create_backup() {
     local selection
     selection=$(whiptail --title "Create Backup" \
         --menu "Select the job:" 15 60 8 \
-        $jobs \
+        "${menu_args[@]}" \
         3>&1 1>&2 2>&3)
 
     if [[ -z "$selection" ]]; then
@@ -152,17 +156,17 @@ tui_create_backup() {
 # ───────────────────────────────────────────────────────────────────────────────
 tui_list_backups() {
     declare -A hosts_seen
-    local hosts_list=""
+    local -a menu_args=()
 
     for section in $(config_get_sections); do
         local host=$(config_get_var "$section" "host")
         if [[ -n "$host" && -z "${hosts_seen[$host]:-}" ]]; then
             hosts_seen[$host]=1
-            hosts_list+="\"$host\" \"\" "
+            menu_args+=("$host" "")
         fi
     done
 
-    if [[ -z "$hosts_list" ]]; then
+    if [[ ${#menu_args[@]} -eq 0 ]]; then
         whiptail --title "Error" --msgbox "No hosts configured" 8 50
         return 1
     fi
@@ -170,7 +174,7 @@ tui_list_backups() {
     local host_sel
     host_sel=$(whiptail --title "List Backups" \
         --menu "Select host:" 12 50 6 \
-        $hosts_list \
+        "${menu_args[@]}" \
         3>&1 1>&2 2>&3)
 
     if [[ -z "$host_sel" ]]; then
@@ -194,17 +198,17 @@ tui_list_backups() {
 # ───────────────────────────────────────────────────────────────────────────────
 tui_open_container() {
     declare -A hosts_seen
-    local hosts_list=""
+    local -a host_args=()
 
     for section in $(config_get_sections); do
         local host=$(config_get_var "$section" "host")
         if [[ -n "$host" && -z "${hosts_seen[$host]:-}" ]]; then
             hosts_seen[$host]=1
-            hosts_list+="\"$host\" \"\" "
+            host_args+=("$host" "")
         fi
     done
 
-    if [[ -z "$hosts_list" ]]; then
+    if [[ ${#host_args[@]} -eq 0 ]]; then
         whiptail --title "Error" --msgbox "No hosts configured" 8 50
         return 1
     fi
@@ -212,7 +216,7 @@ tui_open_container() {
     local host_sel
     host_sel=$(whiptail --title "Open Container" \
         --menu "Select host:" 12 50 6 \
-        $hosts_list \
+        "${host_args[@]}" \
         3>&1 1>&2 2>&3)
 
     if [[ -z "$host_sel" ]]; then
@@ -227,16 +231,16 @@ tui_open_container() {
         return 1
     fi
 
-    local items=""
+    local -a item_args=()
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
-        items+="\"$line\" \"\" "
+        item_args+=("$line" "")
     done <<< "$backups_raw"
 
     local archive_sel
     archive_sel=$(whiptail --title "Select Backup" \
         --menu "Choose a backup to open:" 18 60 10 \
-        $items \
+        "${item_args[@]}" \
         3>&1 1>&2 2>&3)
 
     if [[ -z "$archive_sel" ]]; then
@@ -364,16 +368,35 @@ tui_manage_timers() {
             if whiptail --title "Install Timers" --yesno \
                 "This will create systemd timers for all jobs\nwith type=automatic.\n\nContinue?" 12 60; then
 
-                timer_generate_all
-                whiptail --title "Success" --msgbox "Timers installed successfully" 8 50
+                # Convention-compliant capture: a bare failing call would kill
+                # the whole TUI under set -e. Report through a dialog instead.
+                local gen_out="" gen_rc=0
+                gen_out="$(timer_generate_all 2>&1)" || gen_rc=$?
+
+                if (( gen_rc == 0 )); then
+                    whiptail --title "Install Timers" --msgbox \
+                        "Timers installed successfully\n\n${gen_out}" 20 70
+                else
+                    whiptail --title "Install Timers — Error" --scrolltext --msgbox \
+                        "Timer installation FAILED.\n\n${gen_out}\n\nFix the issue and retry." 22 70
+                    return 1
+                fi
             fi
             ;;
         2)
             if whiptail --title "Uninstall Timers" --yesno \
                 "This will remove all copycrow timers.\n\nContinue?" 10 50; then
 
-                timer_remove_all
-                whiptail --title "Success" --msgbox "Timers removed" 8 50
+                local rem_out="" rem_rc=0
+                rem_out="$(timer_remove_all 2>&1)" || rem_rc=$?
+
+                if (( rem_rc == 0 )); then
+                    whiptail --title "Uninstall Timers" --msgbox "Timers removed" 8 50
+                else
+                    whiptail --title "Uninstall Timers — Error" --scrolltext --msgbox \
+                        "Timer removal FAILED.\n\n${rem_out}" 22 70
+                    return 1
+                fi
             fi
             ;;
         3)

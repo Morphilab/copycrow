@@ -119,7 +119,10 @@ cmd_init() {
         echo "Next steps:"
         echo "  1. Edit copycrow.conf with your real values"
         echo "  2. Configure SSH hosts in ~/.ssh/config"
-        echo "  3. Set BORG_PASSPHRASE: export BORG_PASSPHRASE='your-phrase'"
+        echo "  3. Store the Borg passphrase with pass (timers cannot prompt):"
+        echo "       sudo apt install pass && pass insert copycrow/borg"
+        echo "       export BORG_PASSCOMMAND='pass show copycrow/borg'"
+        echo "     (add that export line to ~/.bashrc)"
         echo "  4. Run: ./copycrow.sh"
     else
         echo "Already exists: copycrow.conf"
@@ -134,6 +137,12 @@ cmd_backup() {
 
     if [[ -z "$job" ]]; then
         echo "ERROR: You must specify a job" >&2
+        echo "Usage: ./copycrow.sh backup <job>" >&2
+        return 1
+    fi
+
+    if [[ -n "${2:-}" ]]; then
+        echo "ERROR: Too many arguments (expected one <job>)" >&2
         echo "Usage: ./copycrow.sh backup <job>" >&2
         return 1
     fi
@@ -170,6 +179,12 @@ cmd_auto() {
         return 1
     fi
 
+    if [[ -n "${2:-}" ]]; then
+        echo "ERROR: Too many arguments (expected one <job>)" >&2
+        echo "Usage: ./copycrow.sh auto <job>" >&2
+        return 1
+    fi
+
     if ! _load_and_validate; then
         return 1
     fi
@@ -195,6 +210,12 @@ cmd_dryrun() {
         return 1
     fi
 
+    if [[ -n "${2:-}" ]]; then
+        echo "ERROR: Too many arguments (expected one <job>)" >&2
+        echo "Usage: ./copycrow.sh dryrun <job>" >&2
+        return 1
+    fi
+
     if ! _load_and_validate; then
         return 1
     fi
@@ -213,6 +234,12 @@ cmd_dryrun() {
 # ───────────────────────────────────────────────────────────────────────────────
 cmd_list() {
     local job="${1:-}"
+
+    if [[ -n "${2:-}" ]]; then
+        echo "ERROR: Too many arguments (expected optional <job>)" >&2
+        echo "Usage: ./copycrow.sh list [job]" >&2
+        return 1
+    fi
 
     if ! _load_and_validate; then
         return 1
@@ -252,6 +279,12 @@ cmd_open() {
 
     if [[ -z "$host" || -z "$archive" ]]; then
         echo "ERROR: You must specify host and archive" >&2
+        echo "Usage: ./copycrow.sh open <host> <archive>" >&2
+        return 1
+    fi
+
+    if [[ -n "${3:-}" ]]; then
+        echo "ERROR: Too many arguments (expected <host> <archive>)" >&2
         echo "Usage: ./copycrow.sh open <host> <archive>" >&2
         return 1
     fi
@@ -304,9 +337,12 @@ cmd_status() {
     echo "copycrow — System Status"
     echo "══════════════════════════"
 
-    if [[ ! -f "${COPYCROW_ROOT}/copycrow.conf" ]]; then
+    # Honor the COPYCROW_CONF override like every other command (the old
+    # hardcoded ROOT path broke status for custom conf locations).
+    local active_conf="${COPYCROW_CONF:-${COPYCROW_ROOT}/copycrow.conf}"
+    if [[ ! -f "$active_conf" ]]; then
         echo ""
-        echo "copycrow.conf not found"
+        echo "Configuration not found: $active_conf"
         echo "Run: ./copycrow.sh init"
         return 1
     fi
@@ -340,8 +376,20 @@ main() {
     local command="${1:-}"
 
     case "$command" in
-        init)
-            cmd_init
+        init|migrate|install|uninstall|status)
+            # Uniform arity: these take no operands (commit b6e7694 covered
+            # only operand-taking commands).
+            if [[ $# -gt 1 ]]; then
+                echo "ERROR: Too many arguments (command '$command' takes none)" >&2
+                return 1
+            fi
+            case "$command" in
+                init)     cmd_init ;;
+                migrate)  cmd_migrate ;;
+                install)  cmd_install ;;
+                uninstall) cmd_uninstall ;;
+                status)   cmd_status ;;
+            esac
             ;;
         backup)
             shift
@@ -367,20 +415,19 @@ main() {
             shift
             cmd_open "$@"
             ;;
-        migrate)
-            cmd_migrate
-            ;;
-        install)
-            cmd_install
-            ;;
-        uninstall)
-            cmd_uninstall
-            ;;
-        status)
-            cmd_status
-            ;;
         help|--help|-h)
+            if [[ $# -gt 1 ]]; then
+                echo "ERROR: Too many arguments (command '$command' takes none)" >&2
+                return 1
+            fi
             show_help
+            ;;
+        --version|-V)
+            if [[ $# -gt 1 ]]; then
+                echo "ERROR: Too many arguments (command '$command' takes none)" >&2
+                return 1
+            fi
+            cat "${COPYCROW_ROOT}/VERSION"
             ;;
         "")
             source "${COPYCROW_ROOT}/src/tui.sh"

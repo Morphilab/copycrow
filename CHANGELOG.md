@@ -2,6 +2,41 @@
 
 All notable changes to copycrow are documented here.
 
+## 1.1.0 — 2026-08-24
+
+Logic fixes and robustness round from a full project audit
+(P0+P1 of `dev/reportes/analisis-completo-v1.0.1.md`).
+
+### Fixed (logic)
+- **fix(parser)**: keys placed before any `[section]` header are now rejected
+  with an explicit error; they used to be silently stored and lost.
+- **fix(parser)**: `migrate` now detects inline legacy values
+  (`frecuencia = diario`, etc.) regardless of an `automatico` being present;
+  migrated configs are always valid under the new parser.
+- **fix(safety)**: `safety_lock_run` captures the command exit code per the
+  project convention; lock release no longer depends on the EXIT trap.
+- **fix(tui)**: backend failures render error dialogs instead of killing the
+  TUI; success dialogs reflect the real result.
+- **fix(timers)**: `timer_generate_all` tracks per-job failures explicitly and
+  reports them instead of returning success with broken timers.
+- **fix(parser,core)**: `auto_prefix`/`manual_prefix` are charset-validated;
+  listing filters archives by literal prefix (regex-safe).
+- **fix(parser)**: `remote_path` must be absolute — prevents malformed
+  `ssh://` repository URLs.
+- **fix(core)**: `_run_capture` temporals are registered for signal-safe cleanup.
+
+### Changed / Robustness
+- **fix(timers)**: non-default `COPYCROW_CONF` is propagated into generated
+  service units (`Environment=`), so timers read the conf they were installed from.
+- **fix(timers)**: `SSH_AUTH_SOCK` is no longer persisted (stale after reboot);
+  agent alternatives documented in README/SECURITY.
+- **fix(parser)**: absolute `mount_dir` is rejected, keeping extractions
+  contained under the project root; `logs_dir` keeps supporting absolute paths.
+- **feat(cli)**: new `--version`/`-V`; surplus arguments are rejected per
+  command arity instead of being ignored.
+- **docs(onboarding)**: all setup paths recommend `pass` + `BORG_PASSCOMMAND`;
+  `BORG_PASSPHRASE` is never suggested as a setup step anymore.
+
 ## 1.0.1 — 2026-08-22
 
 Security and robustness release from a full code audit.

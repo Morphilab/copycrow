@@ -44,6 +44,11 @@ _run_capture() {
 
     local __tmp __rc=0
     __tmp="$(mktemp "${TMPDIR:-/tmp}/copycrow-cap.XXXXXX")"
+    # Register with the global cleanup net when safety.sh is loaded, so a
+    # signal arriving between mktemp and rm cannot orphan the capture file.
+    if declare -F safety_add_temp >/dev/null 2>&1; then
+        safety_add_temp "$__tmp"
+    fi
     "$@" > "$__tmp" 2>&1 || __rc=$?
     printf -v "$__out_var" '%s' "$(cat "$__tmp")"
     rm -f "$__tmp"
@@ -67,9 +72,19 @@ backup_safe_archive_name() {
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
+# _borg_interactive
+# True when borg can prompt the user safely (TTY attached AND no passphrase
+# variables exported). Single source of truth — this check used to be
+# duplicated in create/extract/prune.
+# ───────────────────────────────────────────────────────────────────────────────
+_borg_interactive() {
+    [[ -t 0 ]] && [[ -z "${BORG_PASSPHRASE:-}" && -z "${BORG_PASSCOMMAND:-}" ]]
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
 # backup_init
 # Verifies borg is installed and creates required directories
-# ───────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────────────────
 backup_init() {
     if ! command -v borg &>/dev/null; then
         echo "ERROR: borg is not installed. Run: sudo apt install borgbackup" >&2
@@ -145,7 +160,10 @@ backup_build_repo_url() {
     if [[ "$host" == "local" ]]; then
         echo "$remote_path"
     else
-        echo "ssh://${host}${remote_path}"
+        # Double slash TOTAL: remote_path is validated absolute (leading '/'),
+        # so one literal '/' after the host completes ssh://host//abs/path —
+        # borg's absolute-location form (single slash would be home-relative).
+        echo "ssh://${host}/${remote_path}"
     fi
 }
 
@@ -215,20 +233,21 @@ backup_init_repo() {
     backup_log "INFO" "$section" "init_repo" "started" "repo=${repo_url}"
     echo "Initializing repository: $repo_url..."
 
-    if [[ -n "${BORG_PASSPHRASE:-}" || -n "${BORG_PASSCOMMAND:-}" ]]; then
-        local encryption="--encryption=repokey"
-    else
+    # Encryption is always repokey; without passphrase vars borg will prompt
+    # interactively this once (timers can't, hence the guidance below).
+    local encryption="--encryption=repokey"
+    if [[ -z "${BORG_PASSPHRASE:-}" && -z "${BORG_PASSCOMMAND:-}" ]]; then
         echo ""
-        echo "╔══════════════════════════════════════════════════════════════════╗"
-        echo "║  BORG_PASSPHRASE or BORG_PASSCOMMAND not detected              ║"
-        echo "║                                                                  ║"
-        echo "║  Set them to automate:                                           ║"
-        echo "║    export BORG_PASSPHRASE='your-secret-phrase'                   ║"
-        echo "║                                                                  ║"
-        echo "║  The passphrase will be prompted interactively this time.         ║"
-        echo "╚══════════════════════════════════════════════════════════════════╝"
+        echo "╔════════════════════════════════════════════════════════════════╗"
+        echo "║  No BORG_PASSCOMMAND detected                                  ║"
+        echo "║                                                                ║"
+        echo "║  The passphrase will be prompted INTERACTIVELY this time.      ║"
+        echo "║  Automatic backups (timers) need BORG_PASSCOMMAND:             ║"
+        echo "║    sudo apt install pass                                       ║"
+        echo "║    pass insert copycrow/borg                                   ║"
+        echo "║    export BORG_PASSCOMMAND='pass show copycrow/borg'           ║"
+        echo "╚════════════════════════════════════════════════════════════════╝"
         echo ""
-        local encryption="--encryption=repokey"
     fi
 
     local stderr_output="" exit_code=0
@@ -246,19 +265,15 @@ backup_init_repo() {
                 "error=missing_passphrase_or_interactive_failed"
             echo "ERROR: A passphrase is needed to encrypt the repository" >&2
             echo "" >&2
-            echo "Options (in recommended security order):" >&2
+            echo "Options (recommended: pass, GPG-encrypted, automation-ready):" >&2
             echo "" >&2
-            echo "  With pass (more secure, no plaintext):" >&2
-            echo "    sudo apt install pass" >&2
-            echo "    gpg --gen-key" >&2
-            echo "    pass init 'your-gpg-id'" >&2
-            echo "    pass insert copycrow/borg" >&2
-            echo "    export BORG_PASSCOMMAND='pass show copycrow/borg'" >&2
+            echo "  sudo apt install pass" >&2
+            echo "  gpg --gen-key" >&2
+            echo "  pass init 'your-gpg-id'" >&2
+            echo "  pass insert copycrow/borg" >&2
+            echo "  export BORG_PASSCOMMAND='pass show copycrow/borg'" >&2
             echo "" >&2
-            echo "  With environment variable (simple, plaintext in .bashrc):" >&2
-            echo "    export BORG_PASSPHRASE='your-secret-phrase'" >&2
-            echo "" >&2
-            echo "For automatic backups with timers, BORG_PASSCOMMAND is required." >&2
+            echo "Interactive prompts work this once; timers never will." >&2
             echo "" >&2
             echo "Then run: borg init --encryption=repokey '${repo_url}'" >&2
         else
@@ -320,7 +335,16 @@ backup_check_prerequisites() {
             if [[ -t 0 ]]; then
                 local continue_choice
                 read -r -p "  Continue anyway? (y/N): " continue_choice
-                if [[ "$continue_choice" != "y" && "$continue_choice" != "Y" ]]; then
+                if [[ "$continue_choice" == "y" || "$continue_choice" == "Y" ]]; then
+                    # Only here can an empty agent matter (BatchMode already
+                    # failed). A passing BatchMode check means the key works
+                    # without any agent — warning there was pure noise.
+                    if ! ssh-add -l &>/dev/null; then
+                        backup_log "WARN" "$section" "check" "warning" "ssh_agent=empty"
+                        echo "WARNING: ssh-agent has no unlocked keys." >&2
+                        echo "  If your key has a passphrase, run: ssh-add" >&2
+                    fi
+                else
                     return 1
                 fi
             else
@@ -335,12 +359,6 @@ backup_check_prerequisites() {
             echo "ERROR: Borg is not installed on '$host'" >&2
             echo "  Run: ssh $host 'sudo apt install borgbackup'" >&2
             return 1
-        fi
-
-        if ! ssh-add -l &>/dev/null; then
-            backup_log "WARN" "$section" "check" "warning" "ssh_agent=empty"
-            echo "WARNING: ssh-agent has no unlocked keys." >&2
-            echo "  If your key has a passphrase, run: ssh-add" >&2
         fi
     fi
 
@@ -423,7 +441,7 @@ backup_create() {
 
     local borg_output="" borg_stderr="" exit_code=0 interactive_run=false
 
-    if [[ -t 0 ]] && [[ -z "${BORG_PASSPHRASE:-}" && -z "${BORG_PASSCOMMAND:-}" ]]; then
+    if _borg_interactive; then
         # Interactive: stream output directly to the terminal.
         borg create \
             --info \
@@ -514,8 +532,19 @@ backup_list() {
         echo "WARNING: some repositories of '$host' could not be listed" >&2
     fi
 
+    # Literal prefix matching (no regex): prefixes are charset-validated at
+    # load time, but filtering literally keeps listing correct even for
+    # archive names containing regex metacharacters.
+    # NOTE: `if` instead of `[[ ]] && cmd`: a false condition as the last
+    # statement would poison the loop/function exit code.
     if [[ -n "$prefix" ]]; then
-        printf '%s' "$all" | grep "^${prefix}" 2>/dev/null || true
+        local arch
+        while IFS= read -r arch; do
+            [[ -z "$arch" ]] && continue
+            if [[ "$arch" == "$prefix"* ]]; then
+                printf '%s\n' "$arch"
+            fi
+        done <<< "$all"
     else
         printf '%s' "$all"
     fi
@@ -558,7 +587,7 @@ backup_extract() {
     esac
 
     local cmd_safe
-    cmd_safe=$(printf 'borg extract %q::%q --target %q' "$repo_url" "$archive" "$mnt_dir")
+    cmd_safe=$(printf 'borg extract %q::%q (cwd: %q)' "$repo_url" "$archive" "$mnt_dir")
 
     backup_log "INFO" "extraction" "extract" "started" "archive=${archive}" "cmd=${cmd_safe}"
     echo "Extracting ${archive}..."
@@ -568,10 +597,23 @@ backup_extract() {
 
     local exit_code=0 borg_err=""
 
-    if [[ -t 0 ]] && [[ -z "${BORG_PASSPHRASE:-}" && -z "${BORG_PASSCOMMAND:-}" ]]; then
-        borg extract "${repo_url}::${archive}" --target "$mnt_dir" || exit_code=$?
+    # borg 1.x has NO --target option: extraction goes to the current working
+    # directory. Run it via a hardened helper (umask 077 + cd into the
+    # validated, pre-created mnt_dir) so extracted files are never readable by
+    # group/others regardless of the caller's umask.
+    _extract_cwd() {
+        local dir="$1" spec="$2"
+        umask 077
+        cd -- "$dir" || return 1
+        # NOTE: no `exec` here — in the captured branch this function runs in
+        # the CURRENT shell and exec would replace the whole process, skipping
+        # the post-extract hardening below.
+        borg extract "$spec"
+    }
+    if _borg_interactive; then
+        ( _extract_cwd "$mnt_dir" "${repo_url}::${archive}" ) || exit_code=$?
     else
-        _run_capture borg_err borg extract "${repo_url}::${archive}" --target "$mnt_dir" || exit_code=$?
+        _run_capture borg_err _extract_cwd "$mnt_dir" "${repo_url}::${archive}" || exit_code=$?
     fi
 
     local end
@@ -579,6 +621,10 @@ backup_extract() {
     local duration=$(( end - start ))
 
     if [[ $exit_code -eq 0 ]]; then
+        # Honor the documented umask-077 guarantee end-to-end: borg restores
+        # the permissions STORED in the archive, which may be more permissive.
+        # The extraction dir is 0700 already; this hardens the files too.
+        chmod -R go-rwx -- "$mnt_dir" 2>/dev/null || true
         backup_log "INFO" "extraction" "extract" "ok" "archive=${archive}" "duration=${duration}"
         echo "Extracted to: $mnt_dir (${duration}s)"
         return 0
@@ -631,7 +677,7 @@ backup_prune() {
 
     local exit_code=0 prune_output=""
 
-    if [[ -t 0 ]] && [[ -z "${BORG_PASSPHRASE:-}" && -z "${BORG_PASSCOMMAND:-}" ]]; then
+    if _borg_interactive; then
         borg prune --info $retention "$repo_url" || exit_code=$?
     else
         _run_capture prune_output borg prune --info $retention "$repo_url" || exit_code=$?

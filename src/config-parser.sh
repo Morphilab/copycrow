@@ -65,9 +65,13 @@ config_load() {
     CONFIG_SECTION_SEEN=()
 
     local current_section=""
+    local section_skip=0
     local line
 
     while IFS= read -r line || [[ -n "$line" ]]; do
+        # UTF-8 BOM (Windows editors): strip it or the first section header
+        # becomes invisible and every key "appears before any section".
+        line="${line#$'\xEF\xBB\xBF'}"
         line="${line#"${line%%[![:space:]]*}"}"
         line="${line%"${line##*[![:space:]]}"}"
 
@@ -80,32 +84,48 @@ config_load() {
             fi
             if [[ -n "${CONFIG_SECTION_SEEN[$current_section]:-}" ]]; then
                 echo "WARNING: [$file] duplicate section '$current_section' ignored (first definition wins)" >&2
-                current_section="__duplicate_ignored__"
+                # Boolean flag, NOT a sentinel section name: any name the user
+                # can write must remain usable as a normal job.
+                section_skip=1
                 continue
             fi
             CONFIG_SECTION_SEEN["$current_section"]=1
             CONFIG_SECTIONS+=("$current_section")
+            section_skip=0
             continue
         fi
 
-        if [[ "$line" =~ ^([a-zA-Z0-9_-]+)[[:space:]]*=[[:space:]]*(.+)$ ]]; then
+        if [[ "$line" =~ ^([a-zA-Z0-9_-]+)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
             local key="${BASH_REMATCH[1]}"
             local value="${BASH_REMATCH[2]}"
 
-            # Strip trailing inline comments BEFORE quote handling.
-            # Limitation: a quoted value containing ' #' will be truncated;
-            # no whitelisted key legitimately contains such a sequence.
-            value="${value%%[[:space:]]'#'*}"
-            # Re-trim trailing whitespace left by the comment cut.
-            value="${value%"${value##*[![:space:]]}"}"
+            # Explicit empty values (`key =`) are accepted and stored as "" so
+            # downstream fallbacks behave and errors stay accurate. Only
+            # non-empty values need comment stripping / quote handling.
+            if [[ -n "$value" ]]; then
+                # Strip trailing inline comments BEFORE quote handling.
+                # Limitation: a quoted value containing ' #' will be truncated;
+                # no whitelisted key legitimately contains such a sequence.
+                value="${value%%[[:space:]]'#'*}"
+                # Re-trim trailing whitespace left by the comment cut.
+                value="${value%"${value##*[![:space:]]}"}"
 
-            value="${value#\"}"
-            value="${value%\"}"
-            value="${value#\'}"
-            value="${value%\'}"
+                value="${value#\"}"
+                value="${value%\"}"
+                value="${value#\'}"
+                value="${value%\'}"
+            fi
 
-            if [[ "$current_section" == "__duplicate_ignored__" ]]; then
+            if [[ "$section_skip" == "1" ]]; then
                 continue
+            fi
+
+            # A key before any [section] header would be stored under an
+            # empty section name and silently lost. Fail fast instead.
+            if [[ -z "$current_section" ]]; then
+                echo "ERROR: [$file] key '$key' appears before any [section] header" >&2
+                echo "       Move it inside [global] or a job section." >&2
+                return 1
             fi
 
             local scope="job"
@@ -218,13 +238,20 @@ config_validate_value() {
     local key="$1"
     local value="$2"
 
+    # mount_dir must never be empty: an empty value would resolve the
+    # extraction root to the project root itself.
+    if [[ "$key" == "mount_dir" && -z "$value" ]]; then
+        echo "ERROR: [mount_dir] must not be empty (extractions would land in the project root)" >&2
+        return 1
+    fi
+
     if [[ -z "$value" ]]; then
         return 0
     fi
 
     # Shell metacharacters are forbidden everywhere.
     case "$key" in
-        host|remote_path|sources|mount_dir|logs_dir|compression|retention|retention_default)
+        host|remote_path|sources|mount_dir|logs_dir|compression|retention|retention_default|auto_prefix|manual_prefix)
             if [[ "$value" =~ [\;\&\|\$\`\<\>\\] ]]; then
                 echo "ERROR: [$key] contains forbidden characters" >&2
                 return 1
@@ -242,7 +269,33 @@ config_validate_value() {
                 fi
             fi
             ;;
-        remote_path|mount_dir|logs_dir|sources)
+        remote_path)
+            # A relative path would build a malformed ssh:// URL (the host and
+            # path get concatenated): require absolute from the start.
+            if [[ "$value" != /* ]]; then
+                echo "ERROR: [remote_path] '$value' must be an absolute path starting with '/'" >&2
+                return 1
+            fi
+            if [[ "$value" == *".."* ]]; then
+                echo "ERROR: [$key] must not contain '..'" >&2
+                return 1
+            fi
+            ;;
+        mount_dir)
+            # Extractions and their cleanup are contained under
+            # ${COPYCROW_ROOT}/<mount_dir>: an absolute value would silently
+            # resolve elsewhere. Keep it relative, by contract.
+            # NOTE: must precede the generic path case below (first match wins).
+            if [[ "$value" == /* ]]; then
+                echo "ERROR: [mount_dir] must be relative to the project root (got '$value')" >&2
+                return 1
+            fi
+            if [[ "$value" == *".."* ]]; then
+                echo "ERROR: [$key] must not contain '..'" >&2
+                return 1
+            fi
+            ;;
+        logs_dir|sources)
             if [[ "$value" == *".."* ]]; then
                 echo "ERROR: [$key] must not contain '..'" >&2
                 return 1
@@ -281,6 +334,14 @@ config_validate_value() {
                     return 1
                     ;;
             esac
+            ;;
+        auto_prefix|manual_prefix)
+            # Prefixes become archive names AND are used for literal prefix
+            # matching when listing: keep them regex/option-safe by charset.
+            if ! [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+                echo "ERROR: [$key] '$value' is not a valid prefix (letters, digits, . _ -; must not start with a dash)" >&2
+                return 1
+            fi
             ;;
         schedule)
             case "$value" in
@@ -339,25 +400,25 @@ config_validate() {
 
         if [[ -z "$type" ]]; then
             echo "ERROR: [$section] missing variable 'type'" >&2
-            ((errors++))
+            errors=$((errors + 1))
         elif [[ "$type" != "automatic" && "$type" != "manual" ]]; then
             echo "ERROR: [$section] type '$type' is not valid (use: automatic | manual)" >&2
-            ((errors++))
+            errors=$((errors + 1))
         fi
 
         if [[ -z "$sources" ]]; then
             echo "ERROR: [$section] missing variable 'sources'" >&2
-            ((errors++))
+            errors=$((errors + 1))
         fi
 
         if [[ -z "$host" ]]; then
             echo "ERROR: [$section] missing variable 'host'" >&2
-            ((errors++))
+            errors=$((errors + 1))
         fi
 
         if [[ -z "$remote_path" ]]; then
             echo "ERROR: [$section] missing variable 'remote_path'" >&2
-            ((errors++))
+            errors=$((errors + 1))
         fi
 
         if [[ "$type" == "manual" && -n "$schedule" ]]; then
@@ -424,7 +485,8 @@ config_migrate() {
     cp "$conf_file" "${conf_file}.bak"
     echo "  Backup saved: $(basename "$conf_file").bak"
 
-    local tmp_file="${conf_file}.migrated"
+    local tmp_file
+    tmp_file="$(mktemp "${conf_file}.migrated.XXXXXX")"
 
     sed -e '/^[[:space:]]*#/b' -e '/^[[:space:]]*$/b' \
         -e 's/\(^[[:space:]]*\)retencion_default\([[:space:]]*=[[:space:]]*\)/\1retention_default\2/' \
@@ -441,12 +503,17 @@ config_migrate() {
         "$conf_file" > "$tmp_file"
 
     local needs_value_migration=false
-    if grep -qE '(automatico|^diario$|^semanal$|^mensual$|^minutos[0-9])' "$tmp_file" 2>/dev/null; then
+    # Unanchored on purpose: values appear inline (`frecuencia = diario`), so
+    # ^...$ anchors missed them and left invalid Spanish values behind after
+    # migration. False positives are harmless: the second pass only rewrites
+    # lines whose ENTIRE value is one of the legacy words.
+    if grep -qE '(automatico|diario|semanal|mensual|minutos[0-9])' "$tmp_file" 2>/dev/null; then
         needs_value_migration=true
     fi
 
     if [[ "$needs_value_migration" == "true" ]]; then
-        local tmp_file2="${conf_file}.migrated2"
+        local tmp_file2
+        tmp_file2="$(mktemp "${conf_file}.migrated.XXXXXX")"
         while IFS= read -r line; do
             if [[ "$line" =~ ^[[:space:]]*[a-zA-Z_]+[[:space:]]*=[[:space:]]*automatico[[:space:]]*$ ]]; then
                 line="${line/automatico/automatic}"
@@ -457,6 +524,12 @@ config_migrate() {
             elif [[ "$line" =~ ^[[:space:]]*[a-zA-Z_]+[[:space:]]*=[[:space:]]*mensual[[:space:]]*$ ]]; then
                 line="${line/mensual/monthly}"
             elif [[ "$line" =~ minutos[[:space:]]*=|^minutos ]]; then
+                line="${line/minutos/minutes}"
+            elif [[ "$line" =~ ^[[:space:]]*[a-zA-Z_]+[[:space:]]*=[[:space:]]*minutos[0-9]{2}:[0-9]{2}[[:space:]]*$ ]]; then
+                # P0-2: the key rename pass turns `frecuencia = minutos08:30`
+                # into `schedule = minutos08:30`, which the generic branch
+                # above never matched (no '=' right after 'minutos') and the
+                # whitelist then rejected. Rewrite the whole inline value.
                 line="${line/minutos/minutes}"
             fi
             printf '%s\n' "$line"
