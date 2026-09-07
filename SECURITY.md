@@ -35,7 +35,9 @@ copycrow is designed with the following principles:
 
 7. **User isolation** — timers use `systemd --user`, no root elevation.
 
-8. **SSH hardening recommendation** — the documentation suggests a dedicated passphrase-less SSH key with `command="borg serve --restrict-to-path ..."` in the server's `authorized_keys` (see README).
+8. **Failure hook runs without a shell** — the optional `[global] on_failure_cmd` value is charset-validated at load time (metacharacters `; & | $ \` < > \` are rejected, same class as other keys) and executed via plain word-splitting, never through `eval` or a shell. Failure context reaches the hook only through environment variables (`COPYCROW_FAILED_JOB`, `COPYCROW_FAILURE_ARCHIVE`, `COPYCROW_FAILURE_EXIT_CODE`). A failing hook is logged but cannot alter the backup's result.
+
+9. **SSH hardening recommendation** — the documentation suggests a dedicated passphrase-less SSH key with `command="borg serve --restrict-to-path ..."` in the server's `authorized_keys` (see README).
 
 ## Scope
 

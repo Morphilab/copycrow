@@ -212,3 +212,275 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *copycrow-cap.* ]]
 }
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Log retention (roadmap P2-13 / hallazgo B5)
+# ───────────────────────────────────────────────────────────────────────────────
+
+_make_old_log() {
+    mkdir -p "${COPYCROW_TEST_SANDBOX}/logs-sandbox"
+    touch -d '2020-01-01' "${COPYCROW_TEST_SANDBOX}/logs-sandbox/copycrow-20200101.log"
+}
+
+@test "backup_purge_old_logs: deletes old copycrow logs only (default 30 days)" {
+    _load_conf << EOF
+[global]
+logs_dir = ${COPYCROW_TEST_SANDBOX}/logs-sandbox
+
+[j]
+type = manual
+sources = /home
+host = local
+remote_path = /tmp/repo
+EOF
+    _make_old_log
+    : > "${COPYCROW_TEST_SANDBOX}/logs-sandbox/other-tool.log"
+    : > "${COPYCROW_TEST_SANDBOX}/logs-sandbox/copycrow-today.log"
+
+    run backup_purge_old_logs
+    [ "$status" -eq 0 ]
+    [ ! -e "${COPYCROW_TEST_SANDBOX}/logs-sandbox/copycrow-20200101.log" ]
+    [ -e "${COPYCROW_TEST_SANDBOX}/logs-sandbox/other-tool.log" ]
+    [ -e "${COPYCROW_TEST_SANDBOX}/logs-sandbox/copycrow-today.log" ]
+}
+
+@test "backup_purge_old_logs: honors configured logs_retention_days" {
+    _load_conf << EOF
+[global]
+logs_dir = ${COPYCROW_TEST_SANDBOX}/logs-sandbox
+logs_retention_days = 36500
+
+[j]
+type = manual
+sources = /home
+host = local
+remote_path = /tmp/repo
+EOF
+    _make_old_log
+    run backup_purge_old_logs
+    [ "$status" -eq 0 ]
+    [ -e "${COPYCROW_TEST_SANDBOX}/logs-sandbox/copycrow-20200101.log" ]
+}
+
+@test "backup_create: purges old logs on success AND on failure" {
+    _load_conf << EOF
+[global]
+logs_dir = ${COPYCROW_TEST_SANDBOX}/logs-sandbox
+retention_default = --keep-daily 7
+
+[purge_job]
+type = manual
+sources = /home
+host = local
+remote_path = ${COPYCROW_TEST_SANDBOX}/repo
+EOF
+    _stub_borg 0
+    _make_old_log
+    run backup_create purge_job manual
+    [ "$status" -eq 0 ]
+    [ ! -e "${COPYCROW_TEST_SANDBOX}/logs-sandbox/copycrow-20200101.log" ]
+
+    _stub_borg 2 "simulated failure"
+    _make_old_log
+    run backup_create purge_job manual
+    [ "$status" -ne 0 ]
+    [ ! -e "${COPYCROW_TEST_SANDBOX}/logs-sandbox/copycrow-20200101.log" ]
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# B9: una sola línea Retention en dryrun · C6: dedup de listado multi-repo
+# ───────────────────────────────────────────────────────────────────────────────
+
+@test "dryrun: exactly one Retention line — job override wins" {
+    _load_conf << EOF
+[global]
+retention_default = --keep-daily 7
+
+[dry_ret_job]
+type = manual
+sources = /home
+host = local
+remote_path = /tmp/repo
+retention = --keep-weekly 4
+EOF
+    run backup_create dry_ret_job manual true
+    [ "$status" -eq 0 ]
+    [ "$(grep -c 'Retention:' <<< "$output")" -eq 1 ]
+    [[ "$output" == *"--keep-weekly 4"* ]]
+}
+
+@test "dryrun: exactly one Retention line — global default when job has none" {
+    _load_conf << EOF
+[global]
+retention_default = --keep-daily 7
+
+[dry_def_job]
+type = manual
+sources = /home
+host = local
+remote_path = /tmp/repo
+EOF
+    run backup_create dry_def_job manual true
+    [ "$status" -eq 0 ]
+    [ "$(grep -c 'Retention:' <<< "$output")" -eq 1 ]
+    [[ "$output" == *"(default: --keep-daily 7)"* ]]
+}
+
+@test "backup_list: deduplicates archives present in several repos of one host (C6)" {
+    _stub_borg 0
+    cat > "${PATH_STUB_DIR}/borg" << 'STUB'
+#!/usr/bin/env bash
+if [ "$1" = "list" ]; then
+    printf '%s\n' "auto-20260101-000000" "shared-archive" "auto-20260102-000000"
+fi
+exit 0
+STUB
+    chmod +x "${PATH_STUB_DIR}/borg"
+
+    _load_conf << EOF
+[global]
+auto_prefix = auto-
+
+[r1]
+type = manual
+sources = /home
+host = multi
+remote_path = /backups/r1
+
+[r2]
+type = manual
+sources = /home
+host = multi
+remote_path = /backups/r2
+EOF
+
+    run backup_list "multi" "all"
+    [ "$status" -eq 0 ]
+    [ "$(grep -cx 'auto-20260101-000000' <<< "$output")" -eq 1 ]
+    [ "$(grep -cx 'shared-archive' <<< "$output")" -eq 1 ]
+    [ "$(grep -cx 'auto-20260102-000000' <<< "$output")" -eq 1 ]
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# B10: prompts crudos prohibidos bajo la TUI
+# ───────────────────────────────────────────────────────────────────────────────
+
+@test "_interactive_stdin_available: false when COPYCROW_UNDER_TUI is set" {
+    run bash -c '
+        source "'"${COPYCROW_ROOT}"'/src/backup-core.sh"
+        declare -F _interactive_stdin_available >/dev/null || { echo MISSING; exit 1; }
+        export COPYCROW_UNDER_TUI=1
+        if _interactive_stdin_available; then echo ON; else echo OFF; fi
+    '
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OFF"* ]]
+}
+
+@test "_interactive_stdin_available: false on plain non-TTY stdin" {
+    run bash -c '
+        source "'"${COPYCROW_ROOT}"'/src/backup-core.sh"
+        declare -F _interactive_stdin_available >/dev/null || { echo MISSING; exit 1; }
+        if _interactive_stdin_available; then echo ON; else echo OFF; fi
+    ' < /dev/null
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OFF"* ]]
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# on_failure_cmd hook (roadmap P3-20)
+# ───────────────────────────────────────────────────────────────────────────────
+
+_make_hook_recorder() {
+    export HOOK_LOG="${COPYCROW_TEST_SANDBOX}/hook.log"
+    : > "$HOOK_LOG"
+    cat > "${PATH_STUB_DIR}/onfail-recorder" << REC
+#!/usr/bin/env bash
+printf '%s|%s|%s\n' "\$COPYCROW_FAILED_JOB" "\$COPYCROW_FAILURE_ARCHIVE" "\$COPYCROW_FAILURE_EXIT_CODE" >> "\$HOOK_LOG"
+REC
+    chmod +x "${PATH_STUB_DIR}/onfail-recorder"
+}
+
+@test "backup_notify_failure: runs hook with failure-context env vars" {
+    _make_hook_recorder
+    _load_conf << EOF
+[global]
+on_failure_cmd = ${PATH_STUB_DIR}/onfail-recorder
+
+[j]
+type = manual
+sources = /home
+host = local
+remote_path = /tmp/repo
+EOF
+    run backup_notify_failure myjob auto-X 2
+    [ "$status" -eq 0 ]
+    [ "$(cat "$HOOK_LOG")" = "myjob|auto-X|2" ]
+}
+
+@test "backup_notify_failure: failing hook is logged WARN but never propagates" {
+    _make_hook_recorder
+    cat > "${PATH_STUB_DIR}/onfail-recorder" << 'REC'
+#!/usr/bin/env bash
+exit 9
+REC
+    chmod +x "${PATH_STUB_DIR}/onfail-recorder"
+    _load_conf << EOF
+[global]
+logs_dir = ${COPYCROW_TEST_SANDBOX}/logs-sandbox
+on_failure_cmd = ${PATH_STUB_DIR}/onfail-recorder
+
+[j]
+type = manual
+sources = /home
+host = local
+remote_path = /tmp/repo
+EOF
+    run backup_notify_failure myjob auto-X 3
+    [ "$status" -eq 0 ]
+    grep -q '"action":"notify"' "${COPYCROW_TEST_SANDBOX}/logs-sandbox/"copycrow-*.log
+    grep -q '"status":"failed"' "${COPYCROW_TEST_SANDBOX}/logs-sandbox/"copycrow-*.log
+}
+
+@test "backup_create: fires on_failure_cmd when borg fails; silent on success" {
+    _make_hook_recorder
+    _load_conf << EOF
+[global]
+logs_dir = ${COPYCROW_TEST_SANDBOX}/logs-sandbox
+on_failure_cmd = ${PATH_STUB_DIR}/onfail-recorder
+
+[hook_job]
+type = manual
+sources = /home
+host = local
+remote_path = ${COPYCROW_TEST_SANDBOX}/repo
+EOF
+    _stub_borg 2 "boom"
+    run backup_create hook_job manual
+    [ "$status" -ne 0 ]
+    grep -q '^hook_job|' "$HOOK_LOG"
+
+    rm -f "$HOOK_LOG"; : > "$HOOK_LOG"
+    _stub_borg 0
+    run backup_create hook_job manual
+    [ "$status" -eq 0 ]
+    [ ! -s "$HOOK_LOG" ]
+}
+
+@test "backup_create: fires hook when prerequisites fail (no sources exist)" {
+    _make_hook_recorder
+    _load_conf << EOF
+[global]
+logs_dir = ${COPYCROW_TEST_SANDBOX}/logs-sandbox
+on_failure_cmd = ${PATH_STUB_DIR}/onfail-recorder
+
+[hookp_job]
+type = manual
+sources = /nonexistent-path-xyz
+host = local
+remote_path = ${COPYCROW_TEST_SANDBOX}/repo
+EOF
+    _stub_borg 0
+    run backup_create hookp_job manual
+    [ "$status" -ne 0 ]
+    grep -q '^hookp_job|' "$HOOK_LOG"
+}

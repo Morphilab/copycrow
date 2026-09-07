@@ -47,6 +47,20 @@ logs_dir = logs
 # Number of seconds or 'infinity'. Default: 3600.
 # timeout_start_sec = infinity
 
+# Automatic JSON log purge: delete logs/copycrow-*.log older than N days.
+# Default when unset: 30.
+# logs_retention_days = 30
+
+# Scheduled repository integrity checks (borg check) via a copycrow-verify
+# timer. Values: daily | weekly | monthly. Unset = disabled (run manually
+# with ./copycrow.sh verify <job>).
+# verify_schedule = monthly
+
+# Command executed when a backup or verification FAILS. Runs WITHOUT a shell:
+# no ; & | $ ` < > \ allowed. Context via env vars COPYCROW_FAILED_JOB,
+# COPYCROW_FAILURE_ARCHIVE, COPYCROW_FAILURE_EXIT_CODE.
+# on_failure_cmd = notify-send "copycrow FAILED"
+
 # ───────────────────────────────────────────────────────────────────────────────
 # JOBS — Each [name] section defines a backup task
 #
@@ -56,7 +70,8 @@ logs_dir = logs
 #   host        = SSH alias configured in ~/.ssh/config ("local" for local destinations)
 #   remote_path = path of the Borg repository on the server
 #   schedule    = daily | weekly | monthly | minutesHH:MM (automatic only;
-#                 minutesHH:MM means "every day at HH:MM", e.g. minutes06:30)
+#                 minutesHH:MM means "every day at HH:MM", e.g. minutes06:30;
+#                 friendlier alias: at HH:MM, e.g. at 06:30)
 #   retention   = specific retention policy (overrides global)
 #   compression = compression algorithm (overrides global)
 # ───────────────────────────────────────────────────────────────────────────────

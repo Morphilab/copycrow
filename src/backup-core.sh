@@ -82,6 +82,16 @@ _borg_interactive() {
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
+# _interactive_stdin_available
+# True when a raw `read -p` prompt is safe: REAL tty on stdin AND not running
+# under the TUI (whiptail owns the screen there). The TUI exports
+# COPYCROW_UNDER_TUI=1 for its whole session; backend helpers consult this.
+# ───────────────────────────────────────────────────────────────────────────────
+_interactive_stdin_available() {
+    [[ -t 0 ]] && [[ -z "${COPYCROW_UNDER_TUI:-}" ]]
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
 # backup_init
 # Verifies borg is installed and creates required directories
 # ───────────────────────────────────────────────────────────────────────────────────────
@@ -103,6 +113,40 @@ backup_init() {
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
+# _backup_logs_dir
+# Resolves the effective log directory: absolute honored verbatim, relative
+# under the project root, empty falls back to <root>/logs. Single source of
+# truth shared by backup_log and backup_purge_old_logs.
+# ───────────────────────────────────────────────────────────────────────────────
+_backup_logs_dir() {
+    local base_dir
+    base_dir="$(config_get_global 'logs_dir')"
+    case "$base_dir" in
+        /*) printf '%s\n' "$base_dir" ;;
+        "") printf '%s\n' "${COPYCROW_ROOT}/logs" ;;
+        *)  printf '%s\n' "${COPYCROW_ROOT}/${base_dir}" ;;
+    esac
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# backup_purge_old_logs
+# Deletes copycrow-*.log older than logs_retention_days ([global], default 30).
+# Bounded to the TOP LEVEL of the resolved log dir and to the copycrow log
+# name pattern: nothing else is ever touched.
+# ───────────────────────────────────────────────────────────────────────────────
+backup_purge_old_logs() {
+    local days
+    days="$(config_get_global 'logs_retention_days')"
+    days="${days:-30}"
+
+    local log_dir
+    log_dir="$(_backup_logs_dir)"
+    [[ -d "$log_dir" ]] || return 0
+
+    find "$log_dir" -maxdepth 1 -type f -name 'copycrow-*.log' -mtime +"$days" -delete
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
 # backup_log
 # Writes a detailed JSON line to today's log file
 # Usage: backup_log "INFO" "daily_job" "create" "ok" "archive=name" "duration=45"
@@ -120,13 +164,8 @@ backup_log() {
     local date_log
     date_log=$(date '+%Y%m%d')
 
-    local base_dir log_dir
-    base_dir="$(config_get_global 'logs_dir')"
-    case "$base_dir" in
-        /*) log_dir="$base_dir" ;;
-        "") log_dir="${COPYCROW_ROOT}/logs" ;;
-        *)  log_dir="${COPYCROW_ROOT}/${base_dir}" ;;
-    esac
+    local log_dir
+    log_dir="$(_backup_logs_dir)"
 
     local log_file="${log_dir}/copycrow-${date_log}.log"
 
@@ -332,7 +371,7 @@ backup_check_prerequisites() {
             echo "  · The key is in the server's authorized_keys" >&2
             echo "  · If the key has a passphrase: ssh-add" >&2
 
-            if [[ -t 0 ]]; then
+            if _interactive_stdin_available; then
                 local continue_choice
                 read -r -p "  Continue anyway? (y/N): " continue_choice
                 if [[ "$continue_choice" == "y" || "$continue_choice" == "Y" ]]; then
@@ -362,6 +401,47 @@ backup_check_prerequisites() {
         fi
     fi
 
+    return 0
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# backup_notify_failure
+# Runs the user hook [global] on_failure_cmd when a backup/verification FAILS.
+# Contract (README + copycrow.conf.example):
+#   * the hook string is word-split UNQUOTED — same intentional policy as
+#     sources/retention; charset validation at load time forbids
+#     ; & | $ ` < > \ so no shell/injection surface exists;
+#   * context is exposed ONLY via environment variables;
+#   * a failing hook is logged (WARN) but NEVER changes the backup's result.
+# ───────────────────────────────────────────────────────────────────────────────
+backup_notify_failure() {
+    local section="$1" archive="$2" exit_code="$3"
+
+    local hook
+    hook="$(config_get_global 'on_failure_cmd')"
+    [[ -n "$hook" ]] || return 0
+
+    backup_log "INFO" "$section" "notify" "started" \
+        "hook=${hook}" "archive=${archive}" "exit_code=${exit_code}"
+
+    local out="" rc=0
+    # Word-splitting INTENTIONAL: see function header (charset-whitelisted).
+    # Capture pattern per AGENTS.md: never a bare `out=$(cmd)` under set -e.
+    out=$(
+        export COPYCROW_FAILED_JOB="$section" \
+               COPYCROW_FAILURE_ARCHIVE="$archive" \
+               COPYCROW_FAILURE_EXIT_CODE="$exit_code"
+        ${hook}
+    ) || rc=$?
+
+    if (( rc == 0 )); then
+        backup_log "INFO" "$section" "notify" "ok" "hook=${hook}"
+    else
+        backup_log "WARN" "$section" "notify" "failed" \
+            "hook=${hook}" "exit_code=${rc}" "error=${out:-unknown}"
+        echo "WARNING: on_failure_cmd hook failed (code ${rc})" >&2
+        [[ -n "$out" ]] && echo "  ${out}" >&2
+    fi
     return 0
 }
 
@@ -408,8 +488,15 @@ backup_create() {
         echo "  Source:      $sources"
         echo "  Destination: $repo_url"
         echo "  Archive:     $name"
-        echo "  Retention:   $(config_get_var "$section" "retention")"
-        [[ -z "$(config_get_var "$section" "retention")" ]] && echo "  Retention:   (default: $(config_get_global retention_default))"
+        # Single Retention line always: job override, else the global default
+        # (B9: the old pair printed an empty line AND the default line).
+        local job_retention
+        job_retention="$(config_get_var "$section" "retention")"
+        if [[ -n "$job_retention" ]]; then
+            echo "  Retention:   $job_retention"
+        else
+            echo "  Retention:   (default: $(config_get_global retention_default))"
+        fi
         echo ""
         echo "Equivalent command (not executed):"
         printf '  borg create --info --stats --dry-run --compression %q %q::%q %s\n' \
@@ -426,13 +513,21 @@ backup_create() {
     echo "  Repo:   ${repo_url}"
     echo "  Source: ${sources}"
 
-    if ! backup_check_prerequisites "$section"; then
+    local prereq_rc=0
+    backup_check_prerequisites "$section" || prereq_rc=$?
+    if (( prereq_rc != 0 )); then
         backup_log "ERROR" "$section" "create" "failed" "archive=${name}" "error=prerequisites"
+        backup_notify_failure "$section" "$name" "$prereq_rc"
+        backup_purge_old_logs || true
         return 1
     fi
 
-    if ! backup_init_repo "$repo_url" "$section"; then
+    local init_rc=0
+    backup_init_repo "$repo_url" "$section" || init_rc=$?
+    if (( init_rc != 0 )); then
         backup_log "ERROR" "$section" "create" "failed" "archive=${name}" "error=init_repo_failed"
+        backup_notify_failure "$section" "$name" "$init_rc"
+        backup_purge_old_logs || true
         return 1
     fi
 
@@ -477,6 +572,7 @@ backup_create() {
         fi
 
         backup_prune "$section"
+        backup_purge_old_logs || true
     else
         backup_log "ERROR" "$section" "create" "failed" \
             "archive=${name}" \
@@ -491,6 +587,8 @@ backup_create() {
             echo "  ${borg_stderr}" >&2
         fi
         echo "  Cmd:   ${cmd_safe}" >&2
+        backup_notify_failure "$section" "$name" "$exit_code"
+        backup_purge_old_logs || true
         return 1
     fi
 }
@@ -523,6 +621,12 @@ backup_list() {
         any_ok=true
         all+="${url_out}"
     done < <(backup_get_repo_urls_for_host "$host")
+
+    # The same archive may exist in two repos of one host (re-targeted jobs):
+    # dedupe preserving order (C6).
+    if [[ -n "$all" ]]; then
+        all="$(printf '%s' "$all" | awk '!seen[$0]++')"
+    fi
 
     if [[ "$any_ok" != "true" ]]; then
         echo "ERROR: Repository not accessible for host '$host'" >&2
@@ -697,6 +801,76 @@ backup_prune() {
         [[ -n "${prune_output:-}" ]] && echo "  ${prune_output}" >&2
         return 0
     fi
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# backup_verify
+# `borg check` against ONE job's repository: detects silent corruption.
+# Interactive sessions stream progress; captured runs (timers) record output.
+# Failures fire on_failure_cmd: verification failing silently defeats the
+# whole point of running it.
+# ───────────────────────────────────────────────────────────────────────────────
+backup_verify() {
+    local section="$1"
+
+    local host remote_path
+    host="$(config_get_var "$section" "host")"
+    remote_path="$(config_get_var "$section" "remote_path")"
+
+    local repo_url
+    repo_url=$(backup_build_repo_url "$host" "$remote_path")
+
+    backup_log "INFO" "$section" "verify" "started" "repo=${repo_url}"
+    echo "Verifying repository integrity: ${repo_url}..."
+
+    local start end duration
+    start=$(date +%s)
+
+    local exit_code=0 out=""
+    if _borg_interactive; then
+        borg check --info "$repo_url" || exit_code=$?
+    else
+        _run_capture out borg check --info "$repo_url" || exit_code=$?
+    fi
+
+    end=$(date +%s)
+    duration=$(( end - start ))
+
+    if [[ $exit_code -eq 0 ]]; then
+        backup_log "INFO" "$section" "verify" "ok" \
+            "repo=${repo_url}" "duration=${duration}"
+        echo "Repository OK: ${repo_url} (${duration}s)"
+        [[ -n "$out" ]] && echo "$out"
+        return 0
+    fi
+
+    backup_log "ERROR" "$section" "verify" "failed" \
+        "repo=${repo_url}" "duration=${duration}" \
+        "exit_code=${exit_code}" "error=${out:-unknown}"
+    echo "ERROR: Repository verification FAILED: ${repo_url} (code ${exit_code})" >&2
+    [[ -n "$out" ]] && echo "  ${out}" >&2
+    backup_notify_failure "$section" "verify:${repo_url}" "$exit_code"
+    return 1
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# backup_verify_all
+# Verifies EVERY configured job's repository. Attempts all of them even if
+# some fail (one broken repo must not hide another); nonzero if any failed.
+# Word-splitting of config_get_sections output is intentional.
+# ───────────────────────────────────────────────────────────────────────────────
+backup_verify_all() {
+    local failures=0 section
+    for section in $(config_get_sections); do
+        backup_verify "$section" || failures=$((failures + 1))
+    done
+
+    if (( failures > 0 )); then
+        echo "ERROR: ${failures} repository(ies) failed verification" >&2
+        return 1
+    fi
+    echo "All repositories verified OK."
+    return 0
 }
 
 # ───────────────────────────────────────────────────────────────────────────────

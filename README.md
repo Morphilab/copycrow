@@ -1,9 +1,9 @@
 # CopyCrow
 
-[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](https://github.com/morphilab/copycrow)
+[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](https://github.com/morphilab/copycrow)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Bash](https://img.shields.io/badge/bash-4%2B-orange.svg)](https://www.gnu.org/software/bash/)
-[![Tests](https://img.shields.io/badge/tests-99%2F99%20passing-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-145%2F145%20passing-brightgreen.svg)](tests/)
 [![ShellCheck](https://img.shields.io/badge/shellcheck-0%20issues-brightgreen.svg)](.shellcheckrc)
 
 Automated and manual backup system based on **Borg Backup** with a terminal interface (TUI) and native **systemd** timers.
@@ -27,6 +27,11 @@ Automated and manual backup system based on **Borg Backup** with a terminal inte
 - **Signal trapping** — automatic cleanup on Ctrl+C / SIGTERM / SIGHUP
 - **Config validation** — enforced fail-fast at load time (anti-injection, whitelists, required fields)
 - **Dry-run mode** — `./copycrow.sh dryrun <job>` simulates without writing
+- **Repository verification** — `verify <job>` / `verify-all` run `borg check`; optional `verify_schedule` timer detects silent corruption
+- **Failure notifications** — optional `[global] on_failure_cmd` hook fired when a backup or verification fails
+- **Health check** — `doctor` preflights borg (local/remote), SSH, passphrase strategy, linger, systemd session, disk space and directory permissions
+- **Log retention** — `[global] logs_retention_days` auto-purges old JSON logs (default 30)
+- **Bash completion** — commands, job names and hosts (`completions/copycrow.bash`)
 
 ## ⚠️ AI Disclosure / Divulgación de IA
 
@@ -184,12 +189,49 @@ ssh-add ~/.ssh/id_ed25519
 ./copycrow.sh dryrun <job>          # Simulate backup (writes nothing)
 ./copycrow.sh list [job]            # List backups
 ./copycrow.sh open <host> <arch>    # Extract and open container
+./copycrow.sh verify <job>          # Repository integrity check (borg check)
+./copycrow.sh verify-all            # Verify every configured repository
+./copycrow.sh doctor                # One-shot system health check
 ./copycrow.sh migrate               # Convert legacy config to English v1.0.0
 ./copycrow.sh install               # Install systemd timers
 ./copycrow.sh uninstall             # Remove timers
 ./copycrow.sh status                # System status
 ./copycrow.sh help                  # Help
 ```
+
+## Health checks & notifications
+
+**Verify repositories (`borg check`):**
+```bash
+./copycrow.sh verify daily_job      # one-off integrity check
+```
+Add `verify_schedule = monthly` to `[global]` and run `install` to get a
+`copycrow-verify.timer` that checks every configured repository on a schedule.
+
+**Get notified when a backup fails:**
+```ini
+[global]
+on_failure_cmd = notify-send "copycrow FAILED"
+```
+The hook runs WITHOUT a shell (charset-validated at load; no injection surface)
+and receives context via environment variables:
+`COPYCROW_FAILED_JOB`, `COPYCROW_FAILURE_ARCHIVE`, `COPYCROW_FAILURE_EXIT_CODE`.
+A failing hook is logged but never alters the backup's own result.
+
+**Keep logs under control:** `logs_retention_days = 30` in `[global]` purges
+`logs/copycrow-*.json` older than N days automatically after each backup.
+
+## Tab Completion
+
+```bash
+# Ad hoc:
+source completions/copycrow.bash
+
+# Persistent:
+mkdir -p ~/.local/share/bash-completion/completions
+cp completions/copycrow.bash ~/.local/share/bash-completion/completions/copycrow
+```
+Completes commands, job names (from the active conf) and SSH hosts.
 
 ## Project Structure
 
@@ -210,11 +252,16 @@ copycrow/
 │   ├── safety.sh            ← traps, locks, cleanup
 │   ├── backup-core.sh       ← Borg wrapper + JSON logs
 │   ├── timer-generator.sh   ← systemd timers
+│   ├── doctor.sh            ← health check
 │   └── tui.sh               ← whiptail menus
+├── completions/
+│   └── copycrow.bash        ← bash completion
 ├── tests/                   ← bats-core tests
 │   ├── backup-core.bats
 │   ├── cli.bats
+│   ├── completions.bats
 │   ├── config-parser.bats
+│   ├── doctor.bats
 │   ├── safety.bats
 │   ├── timer-generator.bats
 │   ├── tui.bats

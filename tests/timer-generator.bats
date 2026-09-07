@@ -159,3 +159,78 @@ EOF
     unit="$(printf '%s/systemd/user/copycrow-timer_job.service' "${XDG_CONFIG_HOME:-$HOME/.config}")"
     grep -qF 'Environment="COPYCROW_CONF=' "$unit"
 }
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Timer programable de verificación (roadmap P3-19 parte 2)
+# ───────────────────────────────────────────────────────────────────────────────
+
+_stub_systemctl() {
+    local rc="${1:-0}"
+    mkdir -p "${COPYCROW_TEST_SANDBOX}/bin"
+    cat > "${COPYCROW_TEST_SANDBOX}/bin/systemctl" << EOF
+#!/usr/bin/env bash
+exit ${rc}
+EOF
+    chmod +x "${COPYCROW_TEST_SANDBOX}/bin/systemctl"
+    export PATH="${COPYCROW_TEST_SANDBOX}/bin:${PATH}"
+}
+
+_verify_timer_conf() {
+    _load_timer_conf << EOF
+[global]
+verify_schedule = monthly
+
+[timer_job]
+type = automatic
+sources = /home
+host = local
+remote_path = /tmp/repo
+schedule = daily
+EOF
+    # timer_generate_all loads THIS conf when CONFIG_LOADED is unset.
+    export COPYCROW_CONF="${COPYCROW_TEST_SANDBOX}/test.conf"
+}
+
+@test "timer_generate_verify: no-op when verify_schedule unset (rc 0, no units)" {
+    run timer_generate_verify
+    [ "$status" -eq 0 ]
+    [ ! -e "$HOME/.config/systemd/user/copycrow-verify.timer" ]
+}
+
+@test "timer_generate_verify: generates + enables monthly verify units" {
+    _stub_systemctl 0
+    _verify_timer_conf
+    run timer_generate_verify
+    [ "$status" -eq 0 ]
+    grep -q 'OnCalendar=\*-\*-01 02:00:00' "$HOME/.config/systemd/user/copycrow-verify.timer"
+    grep -qF 'ExecStart="'"${COPYCROW_ROOT}"'/copycrow.sh" verify-all' \
+        "$HOME/.config/systemd/user/copycrow-verify.service"
+    grep -qF "Environment=\"COPYCROW_CONF=${COPYCROW_CONF}\"" \
+        "$HOME/.config/systemd/user/copycrow-verify.service"
+    [[ "$output" == *"Timer enabled: copycrow-verify"* ]]
+}
+
+@test "timer_generate_verify: propagates enable failure (rc 1)" {
+    _stub_systemctl 1
+    _verify_timer_conf
+    run timer_generate_verify
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Could not enable copycrow-verify"* ]]
+}
+
+@test "timer_generate_all: verify timer survives reinstall (orphan-cleanup exempt)" {
+    _stub_systemctl 0
+    _verify_timer_conf
+    timer_generate_all >/dev/null 2>&1 || true
+    [ -e "$HOME/.config/systemd/user/copycrow-verify.timer" ]
+    timer_generate_all >/dev/null 2>&1 || true
+    [ -e "$HOME/.config/systemd/user/copycrow-verify.timer" ]
+}
+
+@test "timer_generate_all: counts verify generation failure toward rc" {
+    _stub_systemctl 1
+    _verify_timer_conf
+    run timer_generate_all
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Could not enable copycrow-verify"* ]]
+}

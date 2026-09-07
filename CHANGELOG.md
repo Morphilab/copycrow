@@ -2,6 +2,44 @@
 
 All notable changes to copycrow are documented here.
 
+## 1.2.0 — 2026-08-24
+
+Roadmap round from the full project audit: reliability ("gold standard"
+backup practices) plus complete CLI↔TUI parity.
+
+### Added
+- **verify <job> / verify-all**: repository integrity via `borg check`;
+  optional `[global] verify_schedule` (daily|weekly|monthly) installs a
+  `copycrow-verify.timer`. Verification failures fire the failure hook too.
+- **doctor**: one-shot health check — borg local/remote, SSH reachability,
+  passphrase strategy, linger, systemd session, disk space and directory
+  permissions, with actionable ✓/✗ output.
+- **on_failure_cmd** ([global]): user hook fired when a backup or verification
+  fails. Context via env vars `COPYCROW_FAILED_JOB`,
+  `COPYCROW_FAILURE_ARCHIVE`, `COPYCROW_FAILURE_EXIT_CODE`. Charset-validated
+  at load; executed without a shell (no eval).
+- **logs_retention_days** ([global], default 30): automatic JSON log purge
+  after each backup.
+- **schedule `at HH:MM`** alias ("daily at HH:MM"), canonicalized internally
+  to the existing `minutesHH:MM`.
+- bash-completion for commands, job names and hosts (`completions/copycrow.bash`).
+
+### Fixed
+- `dryrun` printed a duplicated/empty Retention line when the job had no
+  retention of its own (B9).
+- `list` showed duplicate archives when one archive existed in two repos of
+  the same host (C6).
+- Raw interactive prompts can never appear over the TUI anymore (B10):
+  backend helpers consult a `COPYCROW_UNDER_TUI` flag set by the menu loop.
+
+### Changed
+- TUI now exposes dry-run, configured-jobs detail, verify, doctor and migrate
+  (full CLI↔TUI parity; previously dead `tui_list_jobs` is wired in).
+- CI lints the completion script and runs dryrun+status smokes per build.
+- Language policy codified: public artifacts (UI strings, README, SECURITY)
+  stay in English; internal development docs remain Spanish.
+- Test suite grown from 99 to 145 tests.
+
 ## 1.1.0 — 2026-08-24
 
 Logic fixes and robustness round from a full project audit

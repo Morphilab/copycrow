@@ -41,16 +41,25 @@ tui_main() {
         return 1
     fi
 
+    # Backend calls made from this menu must never show raw interactive
+    # prompts over the whiptail UI (B10).
+    export COPYCROW_UNDER_TUI=1
+
     while true; do
         local option
         option=$(whiptail --title "copycrow — Main Menu" \
-            --menu "Select an option:" 20 70 12 \
+            --menu "Select an option:" 22 70 12 \
             "1" "Create manual backup" \
-            "2" "List backups" \
-            "3" "Open container" \
-            "4" "View system status" \
-            "5" "Manage timers" \
-            "6" "SSH configuration info" \
+            "2" "Dry-run backup (simulate)" \
+            "3" "View configured jobs" \
+            "4" "List backups" \
+            "5" "Open container" \
+            "6" "View system status" \
+            "7" "Health check (doctor)" \
+            "8" "Manage timers" \
+            "9" "SSH configuration info" \
+            "m" "Migrate legacy configuration" \
+            "v" "Verify repository integrity" \
             "0" "Exit" \
             3>&1 1>&2 2>&3)
 
@@ -58,11 +67,16 @@ tui_main() {
             # Handlers report failures through dialogs and may return nonzero;
             # `|| true` keeps the menu loop alive (A4 hardening).
             1) tui_create_backup || true ;;
-            2) tui_list_backups || true ;;
-            3) tui_open_container || true ;;
-            4) tui_view_status || true ;;
-            5) tui_manage_timers || true ;;
-            6) tui_ssh_info || true ;;
+            2) tui_dryrun_backup || true ;;
+            3) tui_list_jobs || true ;;
+            4) tui_list_backups || true ;;
+            5) tui_open_container || true ;;
+            6) tui_view_status || true ;;
+            7) tui_health_check || true ;;
+            8) tui_manage_timers || true ;;
+            9) tui_ssh_info || true ;;
+            m) tui_migrate_config || true ;;
+            v) tui_verify_repo || true ;;
             0|"")
                 clear
                 break
@@ -73,33 +87,155 @@ tui_main() {
 
 # ───────────────────────────────────────────────────────────────────────────────
 # tui_list_jobs
-# Shows all configured jobs
+# Shows all configured jobs with their full definition (wired into the main
+# menu since the P2-15 parity round; it used to be dead code).
 # ───────────────────────────────────────────────────────────────────────────────
 tui_list_jobs() {
-    local jobs=""
-    local section
-
-    for section in $(config_get_sections); do
-        local type=$(config_get_var "$section" "type")
-        local host=$(config_get_var "$section" "host")
-        local sources=$(config_get_var "$section" "sources")
-        jobs+="\"$section\" \"type=$type host=$host\" "
-    done
-
-    if [[ -z "$jobs" ]]; then
+    if [[ ${#CONFIG_SECTIONS[@]} -eq 0 ]]; then
         whiptail --title "Jobs" --msgbox "No jobs configured.\n\nEdit copycrow.conf" 10 60
         return 1
     fi
 
-    whiptail --title "Configured Jobs" --msgbox \
+    local s
+    whiptail --title "Configured Jobs" --scrolltext --msgbox \
         "$(for s in $(config_get_sections); do
-            echo "[$s]"
-            echo "  type: $(config_get_var "$s" "type")"
-            echo "  host: $(config_get_var "$s" "host")"
-            echo "  sources: $(config_get_var "$s" "sources")"
-            echo "  path: $(config_get_var "$s" "remote_path")"
-            echo ""
-        done)" 20 70
+            printf '[%s]\n' "$s"
+            printf '  type: %s\n' "$(config_get_var "$s" type)"
+            printf '  host: %s\n' "$(config_get_var "$s" host)"
+            printf '  sources: %s\n' "$(config_get_var "$s" sources)"
+            printf '  path: %s\n' "$(config_get_var "$s" remote_path)"
+            printf '  schedule: %s\n' "$(config_get_var "$s" schedule)"
+            printf '\n'
+        done)" 22 70
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# tui_dryrun_backup
+# Selects a job and shows what a backup would do. Nothing is written.
+# ───────────────────────────────────────────────────────────────────────────────
+tui_dryrun_backup() {
+    local -a menu_args=()
+    local section
+
+    for section in $(config_get_sections); do
+        local type host
+        type="$(config_get_var "$section" "type")"
+        host="$(config_get_var "$section" "host")"
+        menu_args+=("$section" "[${type}] ${host}")
+    done
+
+    if [[ ${#menu_args[@]} -eq 0 ]]; then
+        whiptail --title "Error" --msgbox "No jobs configured" 8 50
+        return 1
+    fi
+
+    local selection
+    selection=$(whiptail --title "Dry-Run Backup" \
+        --menu "Select the job:" 15 60 8 \
+        "${menu_args[@]}" \
+        3>&1 1>&2 2>&3)
+
+    if [[ -z "$selection" ]]; then
+        return 0
+    fi
+
+    # Convention-compliant capture: dry-run is quiet and fast, so $( ) with
+    # explicit rc keeps the TUI alive on validation errors (A4).
+    local out="" rc=0
+    out="$(backup_create "$selection" "manual" "true" 2>&1)" || rc=$?
+    if (( rc == 0 )); then
+        whiptail --title "Dry-Run: $selection" --scrolltext --msgbox "$out" 22 70
+    else
+        whiptail --title "Dry-Run Failed" --scrolltext --msgbox "$out" 22 70
+    fi
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# tui_verify_repo
+# Selects a job and runs borg check against its repository.
+# ───────────────────────────────────────────────────────────────────────────────
+tui_verify_repo() {
+    local -a menu_args=()
+    local section
+
+    for section in $(config_get_sections); do
+        local host rpath
+        host="$(config_get_var "$section" "host")"
+        rpath="$(config_get_var "$section" "remote_path")"
+        menu_args+=("$section" "${host}:${rpath}")
+    done
+
+    if [[ ${#menu_args[@]} -eq 0 ]]; then
+        whiptail --title "Error" --msgbox "No jobs configured" 8 50
+        return 1
+    fi
+
+    local selection
+    selection=$(whiptail --title "Verify Repository" \
+        --menu "Run borg check for:" 16 64 8 \
+        "${menu_args[@]}" \
+        3>&1 1>&2 2>&3)
+
+    if [[ -z "$selection" ]]; then
+        return 0
+    fi
+
+    local tmp_out="${COPYCROW_ROOT}/.mnt/.tui-output"
+    mkdir -p "${COPYCROW_ROOT}/.mnt"
+
+    whiptail --title "Verifying..." --infobox "Running borg check for '$selection'..." 8 55
+
+    if backup_verify "$selection" > "$tmp_out" 2>&1; then
+        whiptail --title "Verify OK" --scrolltext --msgbox "$(cat "$tmp_out")" 22 70
+    else
+        whiptail --title "Verify FAILED" --scrolltext --msgbox "$(cat "$tmp_out")" 22 70
+    fi
+    rm -f "$tmp_out"
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# tui_health_check
+# Runs the doctor preflight and shows the report in a dialog.
+# ───────────────────────────────────────────────────────────────────────────────
+tui_health_check() {
+    source "${COPYCROW_ROOT}/src/doctor.sh"
+
+    local out="" rc=0
+    out="$(doctor_run 2>&1)" || rc=$?
+
+    local title="Doctor"
+    if (( rc != 0 )); then
+        title="Doctor — problems found"
+    fi
+    whiptail --title "$title" --scrolltext --msgbox "$out" 22 70
+    return 0
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# tui_migrate_config
+# Converts a legacy (Spanish-key) copycrow.conf via config_migrate, then
+# reloads the running session so the rest of the menu sees the new format.
+# ───────────────────────────────────────────────────────────────────────────────
+tui_migrate_config() {
+    if ! whiptail --title "Migrate Configuration" --yesno \
+        "Convert copycrow.conf from legacy Spanish keys/values\nto the current English format?\n\nA .bak backup is created automatically." 11 60; then
+        return 0
+    fi
+
+    local out="" rc=0
+    out="$(config_migrate 2>&1)" || rc=$?
+
+    if (( rc == 0 )); then
+        # Reload so the session reflects the migrated file.
+        if config_reload; then
+            CONFIG_LOADED="1"
+        fi
+        whiptail --title "Migrate Configuration" --scrolltext --msgbox \
+            "${out}\n\nVerify with: ./copycrow.sh status" 18 70
+    else
+        whiptail --title "Migrate Failed" --scrolltext --msgbox "$out" 20 70
+        return 1
+    fi
 }
 
 # ───────────────────────────────────────────────────────────────────────────────

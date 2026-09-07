@@ -66,6 +66,8 @@ EOF
     source "${COPYCROW_ROOT}/src/config-parser.sh"
     config_load "$COPYCROW_CONF"
     CONFIG_LOADED="1"
+    # Production wiring: copycrow.sh sources backup-core BEFORE the TUI.
+    source "${COPYCROW_ROOT}/src/backup-core.sh"
     source "${COPYCROW_ROOT}/src/tui.sh"
 }
 
@@ -104,4 +106,54 @@ teardown() {
     [ -n "$menu_line" ]
     [[ "$menu_line" == *"timer_job [automatic] local"* ]]
     ! grep -qF '"' <<< "$menu_line"
+}
+
+@test "tui_main: exports COPYCROW_UNDER_TUI so backends suppress raw prompts" {
+    FAKE_CHOICE="" tui_main >/dev/null 2>&1 || true
+    [ "${COPYCROW_UNDER_TUI:-}" = "1" ]
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Paridad TUI↔CLI (roadmap P2-15)
+# ───────────────────────────────────────────────────────────────────────────────
+
+@test "tui_main: menu offers dry-run, jobs, verify, doctor and migrate (parity)" {
+    FAKE_CHOICE="" tui_main >/dev/null 2>&1 || true
+    local menu_line
+    menu_line="$(grep -F -- '--menu' "$TUI_LOG" | head -1)"
+    [[ "$menu_line" == *"Dry-run"* ]]
+    [[ "$menu_line" == *"configured jobs"* ]]
+    [[ "$menu_line" == *"doctor"* ]]
+    [[ "$menu_line" == *"Verify repository integrity"* ]]
+    [[ "$menu_line" == *"Migrate legacy configuration"* ]]
+}
+
+@test "tui_list_jobs: renders every job's fields (dead code now wired)" {
+    FAKE_CHOICE="" tui_list_jobs >/dev/null 2>&1 || true
+    grep -q "timer_job" "$TUI_LOG"
+    grep -q "schedule: daily" "$TUI_LOG"
+    grep -q "path: /tmp/repo" "$TUI_LOG"
+}
+
+@test "tui_dryrun_backup: renders the dry-run plan for the selected job" {
+    FAKE_CHOICE=timer_job tui_dryrun_backup >/dev/null 2>&1 || true
+    grep -q "DRY-RUN" "$TUI_LOG"
+}
+
+@test "tui_migrate_config: migrates legacy conf and reloads session" {
+    cat > "$COPYCROW_CONF" << 'EOF'
+[global]
+compresion = lz4
+
+[timer_job]
+tipo = automatico
+origenes = /home
+host = local
+ruta_remota = /tmp/repo
+frecuencia = diario
+EOF
+    FAKE_CHOICE="" tui_migrate_config >/dev/null 2>&1 || true
+    grep -q "^type = automatic$" "$COPYCROW_CONF"
+    grep -q "^schedule = daily$" "$COPYCROW_CONF"
+    [ "$(config_get_var timer_job type)" = "automatic" ]
 }

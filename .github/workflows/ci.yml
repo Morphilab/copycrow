@@ -14,7 +14,7 @@ jobs:
       - name: Run ShellCheck
         run: |
           shellcheck --version
-          shellcheck -x copycrow.sh src/*.sh
+          shellcheck -x copycrow.sh src/*.sh completions/copycrow.bash
 
   bats:
     name: Tests (bats-core)
@@ -29,3 +29,21 @@ jobs:
         run: bats tests/
       - name: Smoke — help
         run: ./copycrow.sh help
+      - name: Smoke — dryrun + status (temp conf; no borg needed)
+        run: |
+          tmp="$(mktemp -d)"
+          {
+            echo "[global]"
+            echo "compression = lz4"
+            echo "mount_dir = .mnt-ci"
+            echo "logs_dir = logs"
+            echo ""
+            echo "[smoke_job]"
+            echo "type = manual"
+            echo "sources = /etc/hostname"
+            echo "host = local"
+            echo "remote_path = /tmp/copycrow-smoke/repo"
+          } > "$tmp/smoke.conf"
+          COPYCROW_CONF="$tmp/smoke.conf" ./copycrow.sh dryrun smoke_job
+          COPYCROW_CONF="$tmp/smoke.conf" ./copycrow.sh status
+          rm -rf "$tmp"

@@ -701,3 +701,143 @@ CONF
     [ -z "$(config_get_var job_r retention)" ]
     rm -f "$conf"
 }
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Roadmap v1.2.0 — nuevas claves globales + alias de schedule
+# ───────────────────────────────────────────────────────────────────────────────
+
+@test "config_load: accepts logs_retention_days / verify_schedule / on_failure_cmd" {
+    cat > /tmp/copycrow-test-newkeys.conf << 'EOF'
+[global]
+logs_retention_days = 14
+verify_schedule = monthly
+on_failure_cmd = notify-send copycrow-failure
+
+[j]
+type = manual
+sources = /home
+host = local
+remote_path = /tmp/r
+EOF
+    # Bare call (not `run`): config_* getters below need the loaded state,
+    # which a `run` subshell would discard.
+    config_load /tmp/copycrow-test-newkeys.conf
+    [ "$(config_get_global logs_retention_days)" = "14" ]
+    [ "$(config_get_global verify_schedule)" = "monthly" ]
+    [ "$(config_get_global on_failure_cmd)" = "notify-send copycrow-failure" ]
+}
+
+@test "logs_retention_days: positive integer only" {
+    local bad
+    for bad in 0 -5 abc 3.5; do
+        cat > /tmp/copycrow-test-lrd.conf << EOF
+[global]
+logs_retention_days = ${bad}
+
+[j]
+type = manual
+sources = /home
+host = local
+remote_path = /tmp/r
+EOF
+        run config_load /tmp/copycrow-test-lrd.conf
+        [ "$status" -ne 0 ] || return 1
+        [[ "$output" == *"logs_retention_days"* ]] || return 1
+    done
+}
+
+@test "verify_schedule: accepts daily|weekly|monthly, rejects others" {
+    local ok bad
+    for ok in daily weekly monthly; do
+        cat > /tmp/copycrow-test-vs-ok.conf << EOF
+[global]
+verify_schedule = ${ok}
+
+[j]
+type = manual
+sources = /home
+host = local
+remote_path = /tmp/r
+EOF
+        run config_load /tmp/copycrow-test-vs-ok.conf
+        [ "$status" -eq 0 ] || return 1
+    done
+    for bad in yearly hourly; do
+        cat > /tmp/copycrow-test-vs-bad.conf << EOF
+[global]
+verify_schedule = ${bad}
+
+[j]
+type = manual
+sources = /home
+host = local
+remote_path = /tmp/r
+EOF
+        run config_load /tmp/copycrow-test-vs-bad.conf
+        [ "$status" -ne 0 ] || return 1
+        [[ "$output" == *"verify_schedule"* ]] || return 1
+    done
+}
+
+@test "on_failure_cmd: rejects shell metacharacters (no eval-class payloads)" {
+    local bad
+    for bad in 'x;y' 'a&b' 'c|d' 'e$f' '`id`' 'a<b'; do
+        cat > /tmp/copycrow-test-ofc.conf << EOF
+[global]
+on_failure_cmd = ${bad}
+
+[j]
+type = manual
+sources = /home
+host = local
+remote_path = /tmp/r
+EOF
+        run config_load /tmp/copycrow-test-ofc.conf
+        [ "$status" -ne 0 ] || return 1
+    done
+}
+
+@test "schedule: 'at HH:MM' alias canonicalizes to minutesHH:MM" {
+    cat > /tmp/copycrow-test-at.conf << 'EOF'
+[global]
+
+[j]
+type = automatic
+sources = /home
+host = local
+remote_path = /tmp/r
+schedule = at 08:30
+EOF
+    # Bare call: state must survive for the getter assertion below.
+    config_load /tmp/copycrow-test-at.conf
+    [ "$(config_get_var j schedule)" = "minutes08:30" ]
+}
+
+@test "schedule: 'at' alias enforces HH 00-23 / MM 00-59 and strict format" {
+    cat > /tmp/copycrow-test-at-bad1.conf << 'EOF'
+[global]
+
+[j]
+type = automatic
+sources = /home
+host = local
+remote_path = /tmp/r
+schedule = at 24:00
+EOF
+    run config_load /tmp/copycrow-test-at-bad1.conf
+    [ "$status" -ne 0 ]
+
+    cat > /tmp/copycrow-test-at-bad2.conf << 'EOF'
+[global]
+
+[j]
+type = automatic
+sources = /home
+host = local
+remote_path = /tmp/r
+schedule = at 7:5
+EOF
+    run config_load /tmp/copycrow-test-at-bad2.conf
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"schedule"* ]]
+}

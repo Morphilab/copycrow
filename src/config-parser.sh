@@ -33,6 +33,7 @@ _config_key_allowed() {
     case "${scope}:${key}" in
         global:retention_default|global:compression|global:auto_prefix|\
 global:manual_prefix|global:mount_dir|global:logs_dir|global:timeout_start_sec|\
+global:logs_retention_days|global:verify_schedule|global:on_failure_cmd|\
 job:type|job:sources|job:host|job:remote_path|job:schedule|job:retention|\
 job:compression)
             return 0
@@ -114,6 +115,13 @@ config_load() {
                 value="${value%\"}"
                 value="${value#\'}"
                 value="${value%\'}"
+            fi
+
+            # `at HH:MM` is the friendly alias for "daily at HH:MM";
+            # normalize to the canonical internal form (minutesHH:MM) so
+            # validation and timer conversion keep a single code path.
+            if [[ "$key" == "schedule" && "$value" =~ ^at[[:space:]]+([0-9]{2}:[0-9]{2})$ ]]; then
+                value="minutes${BASH_REMATCH[1]}"
             fi
 
             if [[ "$section_skip" == "1" ]]; then
@@ -251,7 +259,7 @@ config_validate_value() {
 
     # Shell metacharacters are forbidden everywhere.
     case "$key" in
-        host|remote_path|sources|mount_dir|logs_dir|compression|retention|retention_default|auto_prefix|manual_prefix)
+        host|remote_path|sources|mount_dir|logs_dir|compression|retention|retention_default|auto_prefix|manual_prefix|on_failure_cmd)
             if [[ "$value" =~ [\;\&\|\$\`\<\>\\] ]]; then
                 echo "ERROR: [$key] contains forbidden characters" >&2
                 return 1
@@ -356,12 +364,27 @@ config_validate_value() {
                             return 1
                         fi
                     else
-                        echo "ERROR: [schedule] '$value' invalid format (use minutesHH:MM)" >&2
+                        echo "ERROR: [schedule] '$value' invalid format (use HH:MM as 'minutesHH:MM' or 'at HH:MM')" >&2
                         return 1
                     fi
                     ;;
                 *)
-                    echo "ERROR: [schedule] '$value' is not valid (daily | weekly | monthly | minutesHH:MM)" >&2
+                    echo "ERROR: [schedule] '$value' is not valid (daily | weekly | monthly | minutesHH:MM | at HH:MM)" >&2
+                    return 1
+                    ;;
+            esac
+            ;;
+        logs_retention_days)
+            if ! [[ "$value" =~ ^[1-9][0-9]*$ ]]; then
+                echo "ERROR: [logs_retention_days] '$value' must be a positive number of days" >&2
+                return 1
+            fi
+            ;;
+        verify_schedule)
+            case "$value" in
+                daily|weekly|monthly) ;;
+                *)
+                    echo "ERROR: [verify_schedule] '$value' is not valid (daily | weekly | monthly; unset disables scheduled repo verification)" >&2
                     return 1
                     ;;
             esac

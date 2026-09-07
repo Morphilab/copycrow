@@ -49,10 +49,13 @@ Commands:
   dryrun <job>      Show what would be done without executing
   list [job]        List backups
   open <host> <arch> Open a backup container
+  verify <job>      Check repository integrity (borg check)
+  verify-all        Verify every configured job's repository
   migrate           Convert legacy config to English format
   install           Install systemd timers
   uninstall         Remove systemd timers
   status            Show timer status and last backups
+  doctor            Run a system health check
   help              Show this help
 
 Examples:
@@ -61,7 +64,8 @@ Examples:
   ./copycrow.sh backup daily_job      # Manual backup
   ./copycrow.sh dryrun daily_job      # Simulate backup (writes nothing)
   ./copycrow.sh auto daily_job        # Automatic backup
-  ./copycrow.sh list                  # List all backups
+   ./copycrow.sh list                  # List all backups
+   ./copycrow.sh verify daily_job      # Integrity check (writes nothing)
   ./copycrow.sh migrate               # Convert old config
   ./copycrow.sh install               # Install timers
 
@@ -297,6 +301,57 @@ cmd_open() {
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
+# verify — Repository integrity check (borg check)
+# ───────────────────────────────────────────────────────────────────────────────
+cmd_verify() {
+    local job="${1:-}"
+
+    if [[ -z "$job" ]]; then
+        echo "ERROR: You must specify a job" >&2
+        echo "Usage: ./copycrow.sh verify <job>" >&2
+        return 1
+    fi
+
+    if [[ -n "${2:-}" ]]; then
+        echo "ERROR: Too many arguments (expected one <job>)" >&2
+        echo "Usage: ./copycrow.sh verify <job>" >&2
+        return 1
+    fi
+
+    if ! _load_and_validate; then
+        return 1
+    fi
+
+    local type
+    type="$(config_get_var "$job" "type")"
+    if [[ -z "$type" ]]; then
+        echo "ERROR: Job '$job' not found" >&2
+        return 1
+    fi
+
+    # Same per-job lock as backups: verify cannot interleave with a running
+    # backup of the same job.
+    safety_lock_run "$job" backup_verify "$job"
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# verify-all — Verify every configured repository
+# ───────────────────────────────────────────────────────────────────────────────
+cmd_verify_all() {
+    if [[ -n "${1:-}" ]]; then
+        echo "ERROR: Too many arguments (expected none)" >&2
+        echo "Usage: ./copycrow.sh verify-all" >&2
+        return 1
+    fi
+
+    if ! _load_and_validate; then
+        return 1
+    fi
+
+    backup_verify_all
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
 # migrate — Convert legacy configuration to English
 # ───────────────────────────────────────────────────────────────────────────────
 cmd_migrate() {
@@ -328,6 +383,14 @@ cmd_uninstall() {
     source "${COPYCROW_ROOT}/src/timer-generator.sh"
 
     timer_remove_all
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# doctor — System health check
+# ───────────────────────────────────────────────────────────────────────────────
+cmd_doctor() {
+    source "${COPYCROW_ROOT}/src/doctor.sh"
+    doctor_run
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -376,7 +439,7 @@ main() {
     local command="${1:-}"
 
     case "$command" in
-        init|migrate|install|uninstall|status)
+        init|migrate|install|uninstall|status|doctor)
             # Uniform arity: these take no operands (commit b6e7694 covered
             # only operand-taking commands).
             if [[ $# -gt 1 ]]; then
@@ -389,6 +452,7 @@ main() {
                 install)  cmd_install ;;
                 uninstall) cmd_uninstall ;;
                 status)   cmd_status ;;
+                doctor)   cmd_doctor ;;
             esac
             ;;
         backup)
@@ -414,6 +478,14 @@ main() {
         open)
             shift
             cmd_open "$@"
+            ;;
+        verify)
+            shift
+            cmd_verify "$@"
+            ;;
+        verify-all)
+            shift
+            cmd_verify_all "$@"
             ;;
         help|--help|-h)
             if [[ $# -gt 1 ]]; then

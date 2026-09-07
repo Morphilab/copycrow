@@ -137,3 +137,90 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"dry_job"* ]]
 }
+
+# ───────────────────────────────────────────────────────────────────────────────
+# verify / verify-all (roadmap P3-19)
+# ───────────────────────────────────────────────────────────────────────────────
+
+_make_borg_recorder() {
+    local rc="${1:-0}"
+    export BORG_ARGS_LOG="${COPYCROW_TEST_SANDBOX}/borg-args.log"
+    : > "$BORG_ARGS_LOG"
+    mkdir -p "${COPYCROW_TEST_SANDBOX}/bin"
+    cat > "${COPYCROW_TEST_SANDBOX}/bin/borg" << EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$BORG_ARGS_LOG"
+exit ${rc}
+EOF
+    chmod +x "${COPYCROW_TEST_SANDBOX}/bin/borg"
+    export PATH="${COPYCROW_TEST_SANDBOX}/bin:${PATH}"
+}
+
+_verify_conf_fixture() {
+    cat > "$COPYCROW_CONF" << 'EOF'
+[global]
+
+[v1]
+type = manual
+sources = /home
+host = local
+remote_path = /tmp/copycrow-ver-repo
+EOF
+}
+
+@test "verify: requires a job argument" {
+    run "${COPYCROW_ROOT}/copycrow.sh" verify
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Usage"* ]]
+}
+
+@test "verify: unknown job errors" {
+    _verify_conf_fixture
+    run "${COPYCROW_ROOT}/copycrow.sh" verify no_such_job
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not found"* ]]
+}
+
+@test "verify: runs borg check against the job repository" {
+    _make_borg_recorder 0
+    _verify_conf_fixture
+    run "${COPYCROW_ROOT}/copycrow.sh" verify v1
+    [ "$status" -eq 0 ]
+    grep -q '^check --info /tmp/copycrow-ver-repo$' "$BORG_ARGS_LOG"
+}
+
+@test "verify: fails nonzero when borg check fails" {
+    _make_borg_recorder 3
+    _verify_conf_fixture
+    run "${COPYCROW_ROOT}/copycrow.sh" verify v1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"verification FAILED"* ]]
+}
+
+@test "verify-all: verifies every job; aggregates failures" {
+    _make_borg_recorder 0
+    cat > "$COPYCROW_CONF" << 'EOF'
+[global]
+
+[v1]
+type = manual
+sources = /home
+host = local
+remote_path = /tmp/r1
+
+[v2]
+type = manual
+sources = /home
+host = local
+remote_path = /tmp/r2
+EOF
+    run "${COPYCROW_ROOT}/copycrow.sh" verify-all
+    [ "$status" -eq 0 ]
+    grep -q '/tmp/r1' "$BORG_ARGS_LOG"
+    grep -q '/tmp/r2' "$BORG_ARGS_LOG"
+
+    _make_borg_recorder 2
+    run "${COPYCROW_ROOT}/copycrow.sh" verify-all
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"failed verification"* ]]
+}
