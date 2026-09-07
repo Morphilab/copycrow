@@ -9,6 +9,9 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
+# Load cloud-sync.sh for proton-drive health checks
+source "${COPYCROW_ROOT}/src/cloud-sync.sh"
+
 DOCTOR_OK=0
 DOCTOR_WARN=0
 DOCTOR_FAIL=0
@@ -189,6 +192,43 @@ _doctor_check_permissions() {
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
+# _doctor_check_cloud
+# Proton Drive offsite replication health checks.
+# Only runs when at least one job defines cloud_remote.
+# ───────────────────────────────────────────────────────────────────────────────
+_doctor_check_cloud() {
+    local section has_cloud=false
+    # Word-splitting intentional: sections list.
+    for section in $(config_get_sections); do
+        [[ -n "$(config_get_var "$section" cloud_remote)" ]] && { has_cloud=true; break; }
+    done
+    [[ "$has_cloud" == "true" ]] || return 0
+
+    if cloud_resolve_cli >/dev/null 2>&1; then
+        _doctor_pass "proton-drive CLI: $(cloud_resolve_cli)"
+    else
+        _doctor_fail "proton-drive CLI not found — download from https://proton.me/download/drive/cli or set [global] cloud_cli_path"
+        return 0
+    fi
+
+    if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]] && ! command -v dbus-run-session >/dev/null 2>&1; then
+        _doctor_fail "headless session without dbus-run-session — sudo apt install dbus-x11 (Proton CLI keyring access)"
+    else
+        _doctor_pass "D-Bus wrapper available for the Proton CLI"
+    fi
+
+    local out rc=0
+    out=""
+    _cloud_exec out filesystem info "/" || rc=$?
+    if (( rc == 0 )); then
+        _doctor_pass "Proton Drive session alive (keyring auth)"
+    else
+        _doctor_fail "Proton Drive session NOT usable — authenticate once interactively:"
+        echo "       dbus-run-session -- proton-drive auth login"
+    fi
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
 # doctor_run
 # Orchestrates all checks; config-dependent ones are skipped when conf is broken.
 # ───────────────────────────────────────────────────────────────────────────────
@@ -212,6 +252,7 @@ doctor_run() {
         _doctor_check_systemd
         _doctor_check_disk
         _doctor_check_permissions
+        _doctor_check_cloud
     fi
 
     echo ""

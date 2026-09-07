@@ -157,3 +157,58 @@ EOF
     grep -q "^schedule = daily$" "$COPYCROW_CONF"
     [ "$(config_get_var timer_job type)" = "automatic" ]
 }
+
+# ───────────────────────────────────────────────────────────────────────────────
+# TUI Sync to Proton Drive (parity with CLI)
+# ───────────────────────────────────────────────────────────────────────────────
+
+@test "tui_main: menu offers Proton Drive sync (parity)" {
+    FAKE_CHOICE="" tui_main >/dev/null 2>&1 || true
+    local menu_line
+    menu_line="$(grep -F -- '--menu' "$TUI_LOG" | head -1)"
+    [[ "$menu_line" == *"Sync job to Proton Drive"* ]]
+}
+
+@test "tui_sync_job: lists only cloud-enabled jobs" {
+    cat > "$COPYCROW_CONF" << 'EOF'
+[global]
+
+[cloudy]
+type = manual
+sources = /home
+host = local
+remote_path = /tmp/repo
+cloud_remote = /Backups/cloudy
+
+[offline]
+type = manual
+sources = /home
+host = nas
+remote_path = /backups/offline
+EOF
+    config_load "$COPYCROW_CONF"
+    FAKE_CHOICE="" tui_sync_job >/dev/null 2>&1 || true
+    local menu_line
+    menu_line="$(grep -F -- '--menu' "$TUI_LOG" | tail -1)"
+    [[ "$menu_line" == *"cloudy [local] /Backups/cloudy"* ]]
+    [[ "$menu_line" != *"offline"* ]]
+    # Empty selection (cancel) renders no further dialogs.
+    ! grep -q "Sync FAILED" "$TUI_LOG"
+}
+
+@test "tui_sync_job: failed backend renders failure dialog, survives" {
+    cat > "$COPYCROW_CONF" << 'EOF'
+[global]
+
+[cloudy]
+type = manual
+sources = /home
+host = local
+remote_path = /nonexistent-repo
+cloud_remote = /Backups/cloudy
+EOF
+    config_load "$COPYCROW_CONF"
+    local flow_out="" rc=0
+    flow_out="$(FAKE_CHOICE=cloudy tui_sync_job >/dev/null 2>&1 && echo SURVIVED)" || rc=$?
+    grep -q "Sync FAILED" "$TUI_LOG"
+}

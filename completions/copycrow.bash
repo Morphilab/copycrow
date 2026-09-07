@@ -8,7 +8,7 @@
 
 _copycrow_commands() {
     printf '%s\n' init backup manual auto dryrun list open migrate install \
-        uninstall status verify verify-all doctor help --version
+        uninstall status verify verify-all sync doctor help --version
 }
 
 _copycrow_jobs() {
@@ -39,7 +39,7 @@ _copycrow() {
 
     local cmd="${COMP_WORDS[1]}"
     case "$cmd" in
-        backup|manual|auto|dryrun|verify|list)
+        backup|manual|auto|dryrun|verify|sync|list)
             # Word-splitting INTENTIONAL (compgen -W contract). See above.
             # shellcheck disable=SC2207
             COMPREPLY=($(compgen -W "$(_copycrow_jobs)" -- "$cur"))

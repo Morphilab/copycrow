@@ -51,6 +51,7 @@ Commands:
   open <host> <arch> Open a backup container
   verify <job>      Check repository integrity (borg check)
   verify-all        Verify every configured job's repository
+  sync <job>        Sync a local repository to Proton Drive (needs cloud_remote)
   migrate           Convert legacy config to English format
   install           Install systemd timers
   uninstall         Remove systemd timers
@@ -352,6 +353,51 @@ cmd_verify_all() {
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
+# sync — Manual offsite replication to Proton Drive
+# ───────────────────────────────────────────────────────────────────────────────
+cmd_sync() {
+    local job="${1:-}"
+
+    if [[ -z "$job" ]]; then
+        echo "ERROR: You must specify a job" >&2
+        echo "Usage: ./copycrow.sh sync <job>" >&2
+        return 1
+    fi
+
+    if [[ -n "${2:-}" ]]; then
+        echo "ERROR: Too many arguments (expected one <job>)" >&2
+        echo "Usage: ./copycrow.sh sync <job>" >&2
+        return 1
+    fi
+
+    if ! _load_and_validate; then
+        return 1
+    fi
+
+    local type cloud_remote
+    type="$(config_get_var "$job" "type")"
+    if [[ -z "$type" ]]; then
+        echo "ERROR: Job '$job' not found" >&2
+        return 1
+    fi
+
+    cloud_remote="$(config_get_var "$job" 'cloud_remote')"
+    if [[ -z "$cloud_remote" ]]; then
+        echo "ERROR: Job '$job' has no 'cloud_remote' configured (nothing to sync)" >&2
+        return 1
+    fi
+
+    if [[ "$(config_get_var "$job" 'host')" != "local" ]]; then
+        echo "ERROR: Job '$job' uses a remote repository; cloud sync supports local repositories only" >&2
+        return 1
+    fi
+
+    source "${COPYCROW_ROOT}/src/cloud-sync.sh"
+    # Same per-job lock as backups: sync cannot interleave with borg activity.
+    safety_lock_run "$job" cloud_sync_job "$job"
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
 # migrate — Convert legacy configuration to English
 # ───────────────────────────────────────────────────────────────────────────────
 cmd_migrate() {
@@ -486,6 +532,10 @@ main() {
         verify-all)
             shift
             cmd_verify_all "$@"
+            ;;
+        sync)
+            shift
+            cmd_sync "$@"
             ;;
         help|--help|-h)
             if [[ $# -gt 1 ]]; then

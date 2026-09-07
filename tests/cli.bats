@@ -224,3 +224,183 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"failed verification"* ]]
 }
+
+# ───────────────────────────────────────────────────────────────────────────────
+# cloud chaining (ProtonDrive offsite)
+# ───────────────────────────────────────────────────────────────────────────────
+
+_make_proton_recorder() {
+    export PROTON_ARGS_LOG="${COPYCROW_TEST_SANDBOX}/proton-args.log"
+    export PROTON_UPLOADS_LOG="${COPYCROW_TEST_SANDBOX}/uploads.log"
+    : > "$PROTON_ARGS_LOG"
+    : > "$PROTON_UPLOADS_LOG"
+    export HOME="${COPYCROW_TEST_SANDBOX}/home"
+    mkdir -p "$HOME"
+    export XDG_CACHE_HOME="${HOME}/.cache"
+    export COPYCROW_CLOUD_WRAP="none"
+    export PROTON_STATE="${COPYCROW_TEST_SANDBOX}/drive"
+    mkdir -p "$PROTON_STATE"
+    cat > "${COPYCROW_TEST_SANDBOX}/bin/proton-drive" << 'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${PROTON_ARGS_LOG:?}"
+sub="${1:-}"; shift || true
+case "$sub" in
+    filesystem)
+        cmd="${1:-}"; shift || true
+        case "$cmd" in
+            info)
+                p="${*: -1}"
+                [[ -e "${PROTON_STATE:?}${p}" ]] && exit 0
+                exit 1
+                ;;
+            create-folder)
+                mkdir -p "${PROTON_STATE:?}${1}/${2}"
+                exit 0
+                ;;
+            upload)
+                local_file="$1"; parent="$2"
+                strategy="skip"
+                [[ "${3:-}" == "--conflict-strategy" ]] && strategy="$4"
+                printf 'upload %s %s %s\n' "$local_file" "$parent" "$strategy" >> "${PROTON_UPLOADS_LOG:?}"
+                exit 0
+                ;;
+        esac
+        ;;
+esac
+exit 0
+STUB
+    chmod +x "${COPYCROW_TEST_SANDBOX}/bin/proton-drive"
+    export PATH="${COPYCROW_TEST_SANDBOX}/bin:${PATH}"
+}
+
+_cloud_fixture() {
+    cat > "$COPYCROW_CONF" << EOF
+[global]
+logs_dir = ${COPYCROW_TEST_SANDBOX}/logs
+
+[cjob]
+type = manual
+sources = /home
+host = local
+remote_path = ${COPYCROW_TEST_SANDBOX}/repo
+cloud_remote = /Backups/cjob
+EOF
+    mkdir -p "${COPYCROW_TEST_SANDBOX}/repo" "${COPYCROW_TEST_SANDBOX}/logs"
+    echo data > "${COPYCROW_TEST_SANDBOX}/repo/blob"
+}
+
+@test "backup: chains ProtonDrive sync after a successful backup" {
+    _make_borg_recorder 0
+    _make_proton_recorder
+    _cloud_fixture
+    run "${COPYCROW_ROOT}/copycrow.sh" backup cjob
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ProtonDrive sync:"* ]]
+    grep -qF "upload ${COPYCROW_TEST_SANDBOX}/repo/blob /Backups/cjob skip" "$PROTON_UPLOADS_LOG"
+}
+
+@test "backup: cloud failure NEVER fails the backup itself" {
+    _make_borg_recorder 0
+    _make_proton_recorder
+    # Stub variant that always fails on uploads:
+    cat > "${COPYCROW_TEST_SANDBOX}/bin/proton-drive" << 'STUB'
+#!/usr/bin/env bash
+case "$*" in
+    *"filesystem upload"*) echo "simulated outage" >&2; exit 42 ;;
+    *) exit 0 ;;
+esac
+STUB
+    chmod +x "${COPYCROW_TEST_SANDBOX}/bin/proton-drive"
+    _cloud_fixture
+    run "${COPYCROW_ROOT}/copycrow.sh" backup cjob
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARNING: ProtonDrive sync FAILED"* ]]
+    [[ "$output" == *"./copycrow.sh sync cjob"* ]]
+}
+
+@test "backup: jobs without cloud_remote produce no cloud activity" {
+    _make_borg_recorder 0
+    _make_proton_recorder
+    cat > "$COPYCROW_CONF" << EOF
+[global]
+logs_dir = ${COPYCROW_TEST_SANDBOX}/logs
+
+[plain]
+type = manual
+sources = /home
+host = local
+remote_path = ${COPYCROW_TEST_SANDBOX}/repo
+EOF
+    mkdir -p "${COPYCROW_TEST_SANDBOX}/repo" "${COPYCROW_TEST_SANDBOX}/logs"
+    run "${COPYCROW_ROOT}/copycrow.sh" backup plain
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"ProtonDrive"* ]]
+    [ ! -s "$PROTON_UPLOADS_LOG" ]
+}
+
+@test "dryrun: reports pending cloud files without touching the CLI" {
+    _make_borg_recorder 0
+    _make_proton_recorder
+    _cloud_fixture
+    run "${COPYCROW_ROOT}/copycrow.sh" dryrun cjob
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Cloud:"* ]]
+    [[ "$output" == *"1 pending file(s)"* ]]
+    [ ! -s "$PROTON_UPLOADS_LOG" ]
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# sync command
+# ───────────────────────────────────────────────────────────────────────────────
+
+@test "sync: requires a job argument" {
+    run "${COPYCROW_ROOT}/copycrow.sh" sync
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Usage"* ]]
+}
+
+@test "sync: rejects extra arguments" {
+    run "${COPYCROW_ROOT}/copycrow.sh" sync cjob surplus
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Too many arguments"* ]]
+}
+
+@test "sync: unknown job errors" {
+    _make_borg_recorder 0
+    run "${COPYCROW_ROOT}/copycrow.sh" sync nope
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not found"* ]]
+}
+
+@test "sync: job without cloud_remote errors clearly" {
+    _make_borg_recorder 0
+    cat > "$COPYCROW_CONF" << 'EOF'
+[global]
+
+[plain_job]
+type = manual
+sources = /home
+host = local
+remote_path = /tmp/plain-repo
+EOF
+    run "${COPYCROW_ROOT}/copycrow.sh" sync plain_job
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"no 'cloud_remote'"* ]]
+}
+
+@test "sync: performs locked cloud replication" {
+    _make_borg_recorder 0
+    _make_proton_recorder
+    _cloud_fixture
+    echo blob2 > "${COPYCROW_TEST_SANDBOX}/repo/blob2"
+    run "${COPYCROW_ROOT}/copycrow.sh" sync cjob
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ProtonDrive sync:"* ]]
+    grep -qF "upload ${COPYCROW_TEST_SANDBOX}/repo/blob /Backups/cjob skip" "$PROTON_UPLOADS_LOG"
+    grep -qF "upload ${COPYCROW_TEST_SANDBOX}/repo/blob2 /Backups/cjob skip" "$PROTON_UPLOADS_LOG"
+}
+
+@test "help documents sync" {
+    run "${COPYCROW_ROOT}/copycrow.sh" help
+    [[ "$output" == *"sync <job>"* ]]
+}

@@ -60,6 +60,7 @@ tui_main() {
             "9" "SSH configuration info" \
             "m" "Migrate legacy configuration" \
             "v" "Verify repository integrity" \
+            "s" "Sync job to Proton Drive" \
             "0" "Exit" \
             3>&1 1>&2 2>&3)
 
@@ -77,6 +78,7 @@ tui_main() {
             9) tui_ssh_info || true ;;
             m) tui_migrate_config || true ;;
             v) tui_verify_repo || true ;;
+            s) tui_sync_job || true ;;
             0|"")
                 clear
                 break
@@ -541,4 +543,45 @@ tui_manage_timers() {
             whiptail --title "Active Timers" --scrolltext --msgbox "$timers" 15 70
             ;;
     esac
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# tui_sync_job
+# Picks a cloud-enabled job and replicates it under the job's lock (same
+# contract as ./copycrow.sh sync <job>). Parity requirement P2-15 style.
+# ───────────────────────────────────────────────────────────────────────────────
+tui_sync_job() {
+    local -a menu_args=()
+    local section cr host
+
+    for section in $(config_get_sections); do
+        cr="$(config_get_var "$section" "cloud_remote")"
+        [[ -n "$cr" ]] || continue
+        host="$(config_get_var "$section" "host")"
+        menu_args+=("$section" "[${host}] ${cr}")
+    done
+
+    if [[ ${#menu_args[@]} -eq 0 ]]; then
+        whiptail --title "Sync" --msgbox \
+            "No jobs with 'cloud_remote' configured.\n\nAdd e.g.  cloud_remote = /Backups/<name>\nto a [job] section (host must be local)." \
+            11 60
+        return 1
+    fi
+
+    local choice
+    # Word-splitting INTENTIONAL: whiptail expects flat key/desc pairs.
+    choice=$(whiptail --title "Sync to Proton Drive" --menu "Select job:" \
+        18 70 8 "${menu_args[@]}" 3>&1 1>&2 2>&3) || return 0
+
+    [[ -n "$choice" ]] || return 0
+
+    source "${COPYCROW_ROOT}/src/cloud-sync.sh"
+    if safety_lock_run "$choice" cloud_sync_job "$choice"; then
+        whiptail --title "Sync complete" --msgbox \
+            "Job '${choice}' replicated to Proton Drive." 9 55
+    else
+        whiptail --title "Sync FAILED" --msgbox \
+            "Job '${choice}' could not be fully synced.\nThe local backup remains valid.\nRetry: ./copycrow.sh sync ${choice}" \
+            10 60
+    fi
 }

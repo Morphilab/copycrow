@@ -34,8 +34,9 @@ _config_key_allowed() {
         global:retention_default|global:compression|global:auto_prefix|\
 global:manual_prefix|global:mount_dir|global:logs_dir|global:timeout_start_sec|\
 global:logs_retention_days|global:verify_schedule|global:on_failure_cmd|\
+global:cloud_cli_path|\
 job:type|job:sources|job:host|job:remote_path|job:schedule|job:retention|\
-job:compression)
+job:compression|job:cloud_remote)
             return 0
             ;;
         *)
@@ -259,7 +260,7 @@ config_validate_value() {
 
     # Shell metacharacters are forbidden everywhere.
     case "$key" in
-        host|remote_path|sources|mount_dir|logs_dir|compression|retention|retention_default|auto_prefix|manual_prefix|on_failure_cmd)
+        host|remote_path|sources|mount_dir|logs_dir|compression|retention|retention_default|auto_prefix|manual_prefix|on_failure_cmd|cloud_remote|cloud_cli_path)
             if [[ "$value" =~ [\;\&\|\$\`\<\>\\] ]]; then
                 echo "ERROR: [$key] contains forbidden characters" >&2
                 return 1
@@ -296,6 +297,42 @@ config_validate_value() {
             # NOTE: must precede the generic path case below (first match wins).
             if [[ "$value" == /* ]]; then
                 echo "ERROR: [mount_dir] must be relative to the project root (got '$value')" >&2
+                return 1
+            fi
+            if [[ "$value" == *".."* ]]; then
+                echo "ERROR: [$key] must not contain '..'" >&2
+                return 1
+            fi
+            ;;
+        cloud_remote)
+            # Destination folder INSIDE Proton Drive: absolute-style path,
+            # restricted charset, no traversal components.
+            if [[ "$value" != /* ]]; then
+                echo "ERROR: [cloud_remote] '$value' must start with '/' (path inside Proton Drive)" >&2
+                return 1
+            fi
+            if ! [[ "$value" =~ ^/[A-Za-z0-9._/-]*$ ]]; then
+                echo "ERROR: [cloud_remote] '$value' is not a valid Drive path (letters, digits, . _ / -)" >&2
+                return 1
+            fi
+            if [[ "$value" == *".."* ]]; then
+                echo "ERROR: [$key] must not contain '..'" >&2
+                return 1
+            fi
+            if [[ "$value" == */ || "$value" == *"//"* ]]; then
+                echo "ERROR: [cloud_remote] '$value' must not end with '/' or contain '//'" >&2
+                return 1
+            fi
+            ;;
+        cloud_cli_path)
+            # Executable location: generous but option-safe charset (spaces OK,
+            # metacharacters already banned above); '..' never allowed.
+            if [[ "$value" == -* ]]; then
+                echo "ERROR: [cloud_cli_path] '$value' must not start with '-'" >&2
+                return 1
+            fi
+            if ! [[ "$value" =~ ^[A-Za-z0-9._/[:space:]-]+$ ]]; then
+                echo "ERROR: [cloud_cli_path] '$value' is not a valid executable path" >&2
                 return 1
             fi
             if [[ "$value" == *".."* ]]; then
@@ -450,6 +487,12 @@ config_validate() {
 
         if [[ "$type" == "automatic" && -z "$schedule" ]]; then
             echo "WARNING: [$section] is automatic but has no 'schedule' (will use 'daily')" >&2
+        fi
+
+        local cloud_remote
+        cloud_remote="$(config_get_var "$section" "cloud_remote")"
+        if [[ -n "$cloud_remote" && "$host" != "local" ]]; then
+            echo "WARNING: [$section] has 'cloud_remote' but host='$host': cloud sync only supports host=local (ignored)" >&2
         fi
 
         if [[ -n "$sources" ]]; then

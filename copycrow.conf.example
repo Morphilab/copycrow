@@ -61,6 +61,10 @@ logs_dir = logs
 # COPYCROW_FAILURE_ARCHIVE, COPYCROW_FAILURE_EXIT_CODE.
 # on_failure_cmd = notify-send "copycrow FAILED"
 
+# Proton Drive offsite replication: path of the proton-drive binary when it
+# is not on PATH (see README "Offsite backups to Proton Drive").
+# cloud_cli_path = /usr/local/bin/proton-drive
+
 # ───────────────────────────────────────────────────────────────────────────────
 # JOBS — Each [name] section defines a backup task
 #
@@ -74,6 +78,9 @@ logs_dir = logs
 #                 friendlier alias: at HH:MM, e.g. at 06:30)
 #   retention   = specific retention policy (overrides global)
 #   compression = compression algorithm (overrides global)
+#   cloud_remote = destination folder INSIDE Proton Drive (e.g. /Backups/name);
+#                  its presence enables offsite replication after each backup
+#                  (local repositories only — see README)
 # ───────────────────────────────────────────────────────────────────────────────
 
 # Daily backup of essential directories
@@ -109,3 +116,4 @@ sources = /home/user/documents
 host = local
 remote_path = /mnt/external-backup/copycrow
 retention = --keep-daily 14 --keep-weekly 8
+# cloud_remote = /Backups/local_job

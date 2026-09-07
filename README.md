@@ -221,6 +221,64 @@ A failing hook is logged but never alters the backup's own result.
 **Keep logs under control:** `logs_retention_days = 30` in `[global]` purges
 `logs/copycrow-*.json` older than N days automatically after each backup.
 
+## Offsite backups to Proton Drive (optional)
+
+CopyCrow can replicate any **local** repository (`host = local`) to
+[Proton Drive](https://proton.me/drive) immediately after each successful
+backup, using Proton's official
+[`proton-drive` CLI](https://proton.me/support/drive-cli). Your data gets
+two independent encryption layers: Borg client-side plus Drive E2E.
+
+### One-time setup
+
+```bash
+# Keyring + D-Bus session support (needed by the CLI)
+sudo apt install libsecret-1-0 dbus-x11
+
+# Download the Linux binary from https://proton.me/download/drive/cli
+chmod +x proton-drive && sudo mv proton-drive /usr/local/bin/
+
+# Sign in once (browser opens; session is stored in your OS keyring)
+dbus-run-session -- proton-drive auth login
+```
+
+### Configuration
+
+```ini
+[global]
+# Optional, only if the binary is not on PATH:
+# cloud_cli_path = /usr/local/bin/proton-drive
+
+[local_job]
+host = local
+remote_path = /mnt/external-backup/copycrow
+# The PRESENCE of this key enables offsite replication for the job:
+cloud_remote = /Backups/local_job
+```
+
+Each `backup` of that job now ends with an incremental upload: a local
+manifest (`~/.cache/copycrow/cloud/<job>.manifest`, size+mtime) detects
+unchanged files, so only new/rewritten repository segments travel.
+Manual retry and inspection:
+
+```bash
+./copycrow.sh sync <job>   # retry/force replication
+./copycrow.sh doctor       # validates binary, D-Bus wrapper and session
+```
+
+### Notes and limitations
+
+* Headless machines and systemd timers are supported: every CLI call is
+  automatically wrapped in `dbus-run-session`. Keep `libsecret-1-0`,
+  `dbus-x11` installed and the login keyring unlocked.
+* The first sync uploads the whole repository (~1 API request per file);
+  consider `timeout_start_sec = infinity` for large repos.
+* Repository files removed by Borg pruning are NOT deleted remotely yet
+  (the official CLI has no reliable delete); remote usage grows slowly
+  over time.
+* Restoring elsewhere: download the `cloud_remote` folder with any Proton
+  app, then point borg at the downloaded folder as a normal repository.
+
 ## Tab Completion
 
 ```bash

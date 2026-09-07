@@ -497,6 +497,14 @@ backup_create() {
         else
             echo "  Retention:   (default: $(config_get_global retention_default))"
         fi
+
+        local cloud_remote
+        cloud_remote="$(config_get_var "$section" 'cloud_remote')"
+        if [[ -n "$cloud_remote" && "$host" == "local" ]]; then
+            source "${COPYCROW_ROOT}/src/cloud-sync.sh"
+            echo "  Cloud:       $(cloud_pending_count "$section") pending file(s) -> ${cloud_remote} (after backup)"
+        fi
+
         echo ""
         echo "Equivalent command (not executed):"
         printf '  borg create --info --stats --dry-run --compression %q %q::%q %s\n' \
@@ -572,6 +580,20 @@ backup_create() {
         fi
 
         backup_prune "$section"
+
+        # Offsite replication (opt-in per job). Runs INSIDE this job's flock,
+        # so uploads can never interleave with borg writes/prunes. A cloud
+        # failure must NEVER invalidate the finished local backup.
+        if [[ -n "$(config_get_var "$section" 'cloud_remote')" && "$host" == "local" ]]; then
+            source "${COPYCROW_ROOT}/src/cloud-sync.sh"
+            local cloud_rc=0
+            cloud_sync_job "$section" || cloud_rc=$?
+            if (( cloud_rc != 0 )); then
+                echo "WARNING: ProtonDrive sync FAILED (code ${cloud_rc}); the local backup remains valid." >&2
+                echo "         Retry later with: ./copycrow.sh sync ${section}" >&2
+            fi
+        fi
+
         backup_purge_old_logs || true
     else
         backup_log "ERROR" "$section" "create" "failed" \

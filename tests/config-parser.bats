@@ -841,3 +841,136 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"schedule"* ]]
 }
+
+# ───────────────────────────────────────────────────────────────────────────────
+# cloud keys (ProtonDrive offsite sync)
+# ───────────────────────────────────────────────────────────────────────────────
+
+@test "config_load: accepts cloud_remote and cloud_cli_path" {
+    cat > /tmp/copycrow-test-cloud1.conf << 'EOF'
+[global]
+cloud_cli_path = /usr/local/bin/proton-drive
+
+[c_job]
+type = manual
+sources = /home
+host = local
+remote_path = /tmp/r
+cloud_remote = /Backups/c_job
+EOF
+
+    # Bare call (not `run`): config_* getters below need the loaded state,
+    # which a `run` subshell would discard.
+    config_load /tmp/copycrow-test-cloud1.conf
+    [ "$?" -eq 0 ]
+    [ "$(config_get_var c_job cloud_remote)" = "/Backups/c_job" ]
+    [ "$(config_get_global cloud_cli_path)" = "/usr/local/bin/proton-drive" ]
+}
+
+@test "config_validate_value: rejects relative cloud_remote" {
+    run config_validate_value cloud_remote "Backups/x"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"must start with '/'"* ]]
+}
+
+@test "config_validate_value: rejects traversal in cloud_remote" {
+    run config_validate_value cloud_remote "/Backups/../etc"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"'..'"* ]]
+}
+
+@test "config_validate_value: rejects charset violation in cloud_remote" {
+    run config_validate_value cloud_remote '/Backups/a b'
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not a valid Drive path"* ]]
+}
+
+@test "config_load: metacharacters in cloud keys are forbidden (generic rule)" {
+    cat > /tmp/copycrow-test-cloud2.conf << 'EOF'
+[global]
+cloud_cli_path = /opt/tool;x
+EOF
+
+    run config_load /tmp/copycrow-test-cloud2.conf
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"forbidden characters"* ]]
+}
+
+@test "config_validate_value: rejects bad charset in cloud_cli_path" {
+    run config_validate_value cloud_cli_path '/opt/my tool*'
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"valid executable path"* ]]
+}
+
+@test "config_validate: warns when cloud_remote set on a remote-host job" {
+    cat > /tmp/copycrow-test-cloud3.conf << 'EOF'
+[global]
+
+[r_job]
+type = manual
+sources = /home
+host = nas
+remote_path = /backups/r
+cloud_remote = /Backups/r
+EOF
+
+    config_load /tmp/copycrow-test-cloud3.conf
+    run config_validate
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"only supports host=local"* ]]
+}
+
+@test "config_load: rejects cloud_remote under [global] (scope enforced)" {
+    cat > /tmp/copycrow-test-cloud4.conf << 'EOF'
+[global]
+cloud_remote = /Backups/nope
+EOF
+
+    run config_load /tmp/copycrow-test-cloud4.conf
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"unknown key"* ]]
+}
+
+@test "config_load: rejects cloud_cli_path in a job section (scope enforced)" {
+    cat > /tmp/copycrow-test-cloud5.conf << 'EOF'
+[global]
+
+[j]
+type = manual
+sources = /home
+host = local
+remote_path = /tmp/r
+cloud_cli_path = /usr/bin/proton-drive
+EOF
+
+    run config_load /tmp/copycrow-test-cloud5.conf
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"unknown key"* ]]
+}
+
+@test "config_validate_value: rejects traversal in cloud_cli_path" {
+    run config_validate_value cloud_cli_path '/opt/../evil'
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"'..'"* ]]
+}
+
+@test "config_validate_value: rejects dash-leading cloud_cli_path" {
+    run config_validate_value cloud_cli_path '--help'
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"must not start with '-'"* ]]
+}
+
+@test "config_validate_value: accepts spaces inside cloud_cli_path" {
+    run config_validate_value cloud_cli_path '/opt/my tools/proton-drive'
+    [ "$status" -eq 0 ]
+}
+
+@test "config_validate_value: rejects degenerate slashes in cloud_remote" {
+    run config_validate_value cloud_remote '/Backups/x/'
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"//"* ]]
+
+    run config_validate_value cloud_remote '/Backups//x'
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"//"* ]]
+}

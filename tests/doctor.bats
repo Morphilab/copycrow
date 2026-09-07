@@ -189,3 +189,58 @@ EOF
     run doctor_run
     [[ "$output" == *"[ OK ] permissions ok"* ]]
 }
+
+# ───────────────────────────────────────────────────────────────────────────────
+# cloud (ProtonDrive) checks
+# ───────────────────────────────────────────────────────────────────────────────
+
+@test "doctor: no mention of Proton when no job uses cloud_remote" {
+    run doctor_run
+    [ "$status" -eq 0 ]
+    ! grep -q "Proton" <<< "$output"
+}
+
+@test "doctor: flags missing proton-drive CLI when a cloud job exists" {
+    cat > "$COPYCROW_CONF" << EOF
+[global]
+compression = lz4
+mount_dir = .mnt
+
+[cloudfob]
+type = manual
+sources = ${PROJ_ROOT}/datafile
+host = local
+remote_path = ${PROJ_ROOT}/repo
+cloud_remote = /Backups/cloudfob
+EOF
+    config_load "$COPYCROW_CONF"
+    run doctor_run
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"proton-drive CLI not found"* ]]
+}
+
+@test "doctor: healthy cloud setup passes binary, wrapper and session probes" {
+    cat > "${STUB_BIN}/proton-drive" << 'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "${STUB_BIN}/proton-drive"
+    export COPYCROW_CLOUD_WRAP="none"
+    cat > "$COPYCROW_CONF" << EOF
+[global]
+compression = lz4
+mount_dir = .mnt
+
+[cloudok]
+type = manual
+sources = ${PROJ_ROOT}/datafile
+host = local
+remote_path = ${PROJ_ROOT}/repo
+cloud_remote = /Backups/cloudok
+EOF
+    config_load "$COPYCROW_CONF"
+    run doctor_run
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"proton-drive CLI:"* ]]
+    [[ "$output" == *"Proton Drive session alive"* ]]
+}
