@@ -56,51 +56,59 @@ timer_generate() {
 
     mkdir -p "$SYSTEMD_USER_DIR"
 
+    # TimeoutStartSec from config (validated at load: number or 'infinity').
+    local timeout_sec
+    timeout_sec="$(config_get_global 'timeout_start_sec')"
+    timeout_sec="${timeout_sec:-3600}"
+
     local env_dir="${HOME}/.config/copycrow"
     local env_file="${env_dir}/borg.env"
     local env_line=""
     local wrote_env_file=false
 
-    if [[ -n "${BORG_PASSPHRASE:-}" ]]; then
+    # ── SECURITY INVARIANT ────────────────────────────────────────────────────
+    # BORG_PASSPHRASE is a SECRET: it is NEVER written to disk.
+    # Only BORG_PASSCOMMAND (a command *string*, not the secret itself) and
+    # SSH_AUTH_SOCK (a socket path) are persisted, in a 0600 file inside a
+    # 0700 directory. The file is removed by `uninstall`.
+    # ──────────────────────────────────────────────────────────────────────────
+    if [[ -n "${BORG_PASSPHRASE:-}" && -z "${BORG_PASSCOMMAND:-}" ]]; then
+        echo "  ⚠  WARNING: BORG_PASSPHRASE detected, but it will NOT be stored on disk."
+        echo "     Automatic backups cannot answer interactive passphrase prompts;"
+        echo "     they will fail until you configure BORG_PASSCOMMAND instead."
+        echo ""
+        echo "     Recommended (via pass):"
+        echo "       sudo apt install pass"
+        echo "       pass insert copycrow/borg"
+        echo "       export BORG_PASSCOMMAND='pass show copycrow/borg'"
+        echo ""
+    fi
+
+    if [[ -n "${BORG_PASSCOMMAND:-}" ]]; then
         mkdir -p "$env_dir"
         chmod 700 "$env_dir"
         {
             echo "# copycrow — environment for automatic backups"
-            echo "# Auto-generated. Do not edit manually."
-            echo "BORG_PASSPHRASE=${BORG_PASSPHRASE}"
+            echo "# Auto-generated. Contains NO secrets:"
+            echo "#   BORG_PASSCOMMAND is a command string, not the secret itself."
+            printf 'BORG_PASSCOMMAND=%s\n' "${BORG_PASSCOMMAND}"
         } > "$env_file"
         chmod 600 "$env_file"
         env_line="EnvironmentFile=${env_file}"
         wrote_env_file=true
     fi
-    if [[ -n "${BORG_PASSCOMMAND:-}" ]]; then
-        if [[ "$wrote_env_file" == "false" ]]; then
-            mkdir -p "$env_dir"
-            chmod 700 "$env_dir"
-            {
-                echo "# copycrow — environment for automatic backups"
-                echo "# Auto-generated. Do not edit manually."
-                echo "BORG_PASSCOMMAND=${BORG_PASSCOMMAND}"
-            } > "$env_file"
-            chmod 600 "$env_file"
-            env_line="EnvironmentFile=${env_file}"
-            wrote_env_file=true
-        else
-            printf 'BORG_PASSCOMMAND=%s\n' "${BORG_PASSCOMMAND}" >> "$env_file"
-        fi
-    fi
+
     if [[ -n "${SSH_AUTH_SOCK:-}" ]]; then
         if [[ "$wrote_env_file" == "false" ]]; then
             mkdir -p "$env_dir"
             chmod 700 "$env_dir"
             {
                 echo "# copycrow — environment for automatic backups"
-                echo "# Auto-generated. Do not edit manually."
-                echo "SSH_AUTH_SOCK=${SSH_AUTH_SOCK}"
+                echo "# Auto-generated."
+                printf 'SSH_AUTH_SOCK=%s\n' "${SSH_AUTH_SOCK}"
             } > "$env_file"
             chmod 600 "$env_file"
             env_line="EnvironmentFile=${env_file}"
-            wrote_env_file=true
         else
             printf 'SSH_AUTH_SOCK=%s\n' "${SSH_AUTH_SOCK}" >> "$env_file"
         fi
@@ -119,7 +127,7 @@ WorkingDirectory=${COPYCROW_ROOT}
 ${env_line}
 StandardOutput=journal
 StandardError=journal
-TimeoutStartSec=3600
+TimeoutStartSec=${timeout_sec}
 
 [Install]
 WantedBy=default.target
@@ -286,6 +294,11 @@ timer_remove() {
 # Removes all copycrow timers
 # ───────────────────────────────────────────────────────────────────────────────
 timer_remove_all() {
+    # Always clean persisted credentials, even when no timers exist:
+    # uninstalling must leave nothing behind.
+    rm -f "${HOME}/.config/copycrow/borg.env"
+    rmdir "${HOME}/.config/copycrow" 2>/dev/null || true
+
     shopt -s nullglob
     local timer_files=("${SYSTEMD_USER_DIR}/${TIMER_PREFIX}-"*.timer)
     shopt -u nullglob

@@ -32,6 +32,15 @@ tui_main() {
         return 1
     fi
 
+    # Same validation contract as the CLI: refuse to operate on a broken conf.
+    local val_out rc=0
+    val_out="$(config_validate 2>&1)" || rc=$?
+    if (( rc != 0 )); then
+        whiptail --title "copycrow — Configuration errors" --scrolltext --msgbox \
+            "${val_out}\n\nFix copycrow.conf and relaunch." 22 70
+        return 1
+    fi
+
     while true; do
         local option
         option=$(whiptail --title "copycrow — Main Menu" \

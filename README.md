@@ -3,7 +3,7 @@
 [![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/morphilab/copycrow)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Bash](https://img.shields.io/badge/bash-4%2B-orange.svg)](https://www.gnu.org/software/bash/)
-[![Tests](https://img.shields.io/badge/tests-34%2F34%20passing-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-69%2F69%20passing-brightgreen.svg)](tests/)
 [![ShellCheck](https://img.shields.io/badge/shellcheck-0%20issues-brightgreen.svg)](.shellcheckrc)
 
 Automated and manual backup system based on **Borg Backup** with a terminal interface (TUI) and native **systemd** timers.
@@ -22,9 +22,10 @@ Automated and manual backup system based on **Borg Backup** with a terminal inte
 - **Native automation** with `systemd --user timers` (no custom daemon)
 - **Detailed JSON logs** with timestamps, exit codes, and executed commands
 - **No credentials in code** — uses the system's `~/.ssh/config`
-- **File locking** — prevents concurrent executions of the same job
-- **Signal trapping** — automatic cleanup on Ctrl+C / SIGTERM
-- **Config validation** — anti command-injection on `.conf` values
+- **Secrets never touch disk** — `BORG_PASSPHRASE` is never persisted; timers only receive `BORG_PASSCOMMAND`
+- **File locking (atomic)** — prevents concurrent executions of the same job
+- **Signal trapping** — automatic cleanup on Ctrl+C / SIGTERM / SIGHUP
+- **Config validation** — enforced fail-fast at load time (anti-injection, whitelists, required fields)
 - **Dry-run mode** — `./copycrow.sh dryrun <job>` simulates without writing
 
 ## ⚠️ AI Disclosure / Divulgación de IA
@@ -101,6 +102,7 @@ retention_default = --keep-daily 7 --keep-weekly 4 --keep-monthly 6
 compression = lz4
 mount_dir = .mnt
 logs_dir = logs
+# timeout_start_sec = infinity        # optional; default 3600 (1 h)
 
 [daily_job]
 type = automatic
@@ -159,6 +161,11 @@ export BORG_PASSCOMMAND="pass show copycrow/borg"
 ```
 
 Add to `~/.bashrc` for persistence. Copycrow propagates `BORG_PASSCOMMAND` to timers automatically.
+
+> **Note:** copycrow never writes your passphrase to disk. If only `BORG_PASSPHRASE`
+> is set, automatic timers will refuse to persist it and backups will fail until you
+> configure `BORG_PASSCOMMAND`. Running `./copycrow.sh uninstall` removes the generated
+> environment file.
 
 ### ssh-agent for SSH keys with passphrase
 
@@ -254,10 +261,10 @@ ssh host "sudo apt install borgbackup"
 ```
 
 **"missing_passphrase" (in automatic timers)**
-You need `BORG_PASSCOMMAND` configured. See the [Security](#security) section.
+You need `BORG_PASSCOMMAND` configured — `BORG_PASSPHRASE` alone is never persisted to disk (by design). See the [Security](#security) section.
 
-**"BORG_PASSPHRASE is not set"**
-Configure the passphrase. Recommended: use `pass` + `BORG_PASSCOMMAND` (see [Security](#security)).
+**"BORG_PASSPHRASE is not set" / passphrase prompts in timers**
+Timers cannot answer interactive prompts. Configure the passphrase via `pass` + `BORG_PASSCOMMAND` (see [Security](#security)).
 
 **"Repository does not exist"**
 The repo is initialized automatically on the first backup. If it fails, check:

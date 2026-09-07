@@ -56,3 +56,32 @@ teardown() {
     [ "$status" -ne 0 ]
     [[ "$output" == *"already in progress"* ]]
 }
+
+@test "safety_lock_acquire: only one of 20 concurrent acquirers wins" {
+    local dir="/tmp/copycrow-race-$$"
+    rm -rf "$dir"
+    mkdir -p "$dir"
+    : > "$dir/winners"
+    export LOCK_DIR="$dir"
+
+    local i
+    for i in {1..20}; do
+        (
+            if safety_lock_acquire "race_job" >/dev/null 2>&1; then
+                echo W >> "$dir/winners"
+            fi
+        ) &
+    done
+    wait
+
+    local count
+    count=$(grep -c W "$dir/winners" || true)
+    rm -rf "$dir"
+    [ "$count" -le 1 ]
+}
+
+@test "safety_init: registers SIGHUP handler" {
+    run bash -c 'source "'"$COPYCROW_ROOT"'/src/safety.sh"; safety_init; trap -p HUP'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *HUP* ]]
+}

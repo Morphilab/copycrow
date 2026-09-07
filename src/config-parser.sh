@@ -8,8 +8,8 @@ set -euo pipefail
 # Project root directory
 COPYCROW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Configuration file
-COPYCROW_CONF="${COPYCROW_ROOT}/copycrow.conf"
+# Configuration file (overridable via environment for sandboxes/tests)
+COPYCROW_CONF="${COPYCROW_CONF:-${COPYCROW_ROOT}/copycrow.conf}"
 
 # Associative arrays for config storage
 declare -gA CONFIG_GLOBAL
@@ -18,9 +18,36 @@ declare -gA CONFIG_JOBS
 # List of sections (jobs) found
 CONFIG_SECTIONS=()
 
+# Seen-section registry (duplicate protection)
+declare -gA CONFIG_SECTION_SEEN
+
+# ───────────────────────────────────────────────────────────────────────────────
+# _config_key_allowed
+# Whitelist of accepted configuration keys.
+# Unknown keys make config_load FAIL — typos can never create silent holes.
+# ───────────────────────────────────────────────────────────────────────────────
+_config_key_allowed() {
+    local scope="$1"
+    local key="$2"
+
+    case "${scope}:${key}" in
+        global:retention_default|global:compression|global:auto_prefix|\
+global:manual_prefix|global:mount_dir|global:logs_dir|global:timeout_start_sec|\
+job:type|job:sources|job:host|job:remote_path|job:schedule|job:retention|\
+job:compression)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 # ───────────────────────────────────────────────────────────────────────────────
 # config_load
-# Loads copycrow.conf and parses all sections
+# Loads copycrow.conf and parses all sections.
+# Fail-fast: unknown keys or values failing config_validate_value abort loading,
+# so anti-injection checks cannot be bypassed downstream.
 # ───────────────────────────────────────────────────────────────────────────────
 config_load() {
     local file="${1:-$COPYCROW_CONF}"
@@ -30,6 +57,12 @@ config_load() {
         echo "Run: ./copycrow.sh init" >&2
         return 1
     fi
+
+    # Reset state so repeated loads never accumulate stale entries.
+    CONFIG_GLOBAL=()
+    CONFIG_JOBS=()
+    CONFIG_SECTIONS=()
+    CONFIG_SECTION_SEEN=()
 
     local current_section=""
     local line
@@ -45,6 +78,12 @@ config_load() {
             if [[ "$current_section" == "global" ]]; then
                 continue
             fi
+            if [[ -n "${CONFIG_SECTION_SEEN[$current_section]:-}" ]]; then
+                echo "WARNING: [$file] duplicate section '$current_section' ignored (first definition wins)" >&2
+                current_section="__duplicate_ignored__"
+                continue
+            fi
+            CONFIG_SECTION_SEEN["$current_section"]=1
             CONFIG_SECTIONS+=("$current_section")
             continue
         fi
@@ -53,15 +92,41 @@ config_load() {
             local key="${BASH_REMATCH[1]}"
             local value="${BASH_REMATCH[2]}"
 
+            # Strip trailing inline comments BEFORE quote handling.
+            # Limitation: a quoted value containing ' #' will be truncated;
+            # no whitelisted key legitimately contains such a sequence.
+            value="${value%%[[:space:]]'#'*}"
+            # Re-trim trailing whitespace left by the comment cut.
+            value="${value%"${value##*[![:space:]]}"}"
+
             value="${value#\"}"
             value="${value%\"}"
             value="${value#\'}"
             value="${value%\'}"
 
-            if [[ "$current_section" == "global" ]]; then
-                CONFIG_GLOBAL["${key}"]="$value"
-            elif [[ -n "$current_section" ]]; then
-                CONFIG_JOBS["${current_section}_${key}"]="$value"
+            if [[ "$current_section" == "__duplicate_ignored__" ]]; then
+                continue
+            fi
+
+            local scope="job"
+            [[ "$current_section" == "global" ]] && scope="global"
+
+            if ! _config_key_allowed "$scope" "$key"; then
+                echo "ERROR: [$file] unknown key '$key' in section '${current_section:-<none>}'" >&2
+                echo "       See copycrow.conf.example for accepted keys." >&2
+                return 1
+            fi
+
+            if ! config_validate_value "$key" "$value"; then
+                return 1
+            fi
+
+            if [[ "$scope" == "global" ]]; then
+                CONFIG_GLOBAL["$key"]="$value"
+            else
+                # ':' separator: section names cannot contain ':', so
+                # <section>:<key> collisions are structurally impossible.
+                CONFIG_JOBS["${current_section}:${key}"]="$value"
             fi
         fi
     done < "$file"
@@ -80,13 +145,12 @@ config_get_sections() {
 # ───────────────────────────────────────────────────────────────────────────────
 # config_get_var
 # Returns the value of a variable from a specific job
-# Falls back to [global] if not found in the job
 # Usage: config_get_var "daily_job" "host"
 # ───────────────────────────────────────────────────────────────────────────────
 config_get_var() {
     local section="$1"
     local variable="$2"
-    local compound_key="${section}_${variable}"
+    local compound_key="${section}:${variable}"
 
     printf '%s' "${CONFIG_JOBS[$compound_key]:-}"
 }
@@ -99,7 +163,7 @@ config_get_var() {
 config_get_var_or_global() {
     local section="$1"
     local variable="$2"
-    local compound_key="${section}_${variable}"
+    local compound_key="${section}:${variable}"
 
     if [[ -n "${CONFIG_JOBS[$compound_key]:-}" ]]; then
         printf '%s' "${CONFIG_JOBS[$compound_key]}"
@@ -146,8 +210,9 @@ config_get_manual_jobs() {
 
 # ───────────────────────────────────────────────────────────────────────────────
 # config_validate_value
-# Checks that a config value does not contain dangerous characters
-# (anti command injection / path traversal)
+# Checks that a config value does not contain dangerous characters or payloads.
+# (anti command injection / path traversal / argument injection)
+# Called automatically by config_load (fail-fast).
 # ───────────────────────────────────────────────────────────────────────────────
 config_validate_value() {
     local key="$1"
@@ -157,59 +222,94 @@ config_validate_value() {
         return 0
     fi
 
+    # Shell metacharacters are forbidden everywhere.
     case "$key" in
-        host|remote_path|sources|mount_dir|logs_dir|compression)
+        host|remote_path|sources|mount_dir|logs_dir|compression|retention|retention_default)
             if [[ "$value" =~ [\;\&\|\$\`\<\>\\] ]]; then
                 echo "ERROR: [$key] contains forbidden characters" >&2
                 return 1
             fi
-            if [[ "$key" == "host" && "$value" != "local" ]]; then
-                if ! [[ "$value" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+            ;;
+    esac
+
+    case "$key" in
+        host)
+            if [[ "$value" != "local" ]]; then
+                # No leading dash: blocks SSH option injection (-oProxyCommand=...)
+                if ! [[ "$value" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]]; then
                     echo "ERROR: [host] '$value' is not a valid SSH alias" >&2
                     return 1
                 fi
             fi
-            if [[ "$key" == "remote_path" || "$key" == "sources" || "$key" == "mount_dir" || "$key" == "logs_dir" ]]; then
-                if [[ "$value" == *".."* ]]; then
-                    echo "ERROR: [$key] must not contain '..'" >&2
-                    return 1
-                fi
+            ;;
+        remote_path|mount_dir|logs_dir|sources)
+            if [[ "$value" == *".."* ]]; then
+                echo "ERROR: [$key] must not contain '..'" >&2
+                return 1
             fi
-            if [[ "$key" == "compression" ]]; then
-                case "$value" in
-                    lz4|zstd|zlib|lzma|none) ;;
-                    *)
-                        echo "ERROR: [compression] '$value' is not valid (lz4, zstd, zlib, lzma, none)" >&2
+            ;;
+        compression)
+            case "$value" in
+                lz4|zstd|zlib|lzma|none) ;;
+                *)
+                    echo "ERROR: [compression] '$value' is not valid (lz4, zstd, zlib, lzma, none)" >&2
+                    return 1
+                    ;;
+            esac
+            ;;
+        retention|retention_default)
+            # Only borg prune --keep-* flags followed by numbers.
+            # Word-splitting is intentional: retention is a flag list.
+            local token
+            for token in $value; do
+                case "$token" in
+                    --keep-secondly|--keep-minutely|--keep-hourly|--keep-daily|\
+--keep-weekly|--keep-monthly|--keep-yearly)
+                        ;;
+                    *[!0-9]*)
+                        echo "ERROR: [$key] invalid token '$token' (use e.g. --keep-daily 7)" >&2
                         return 1
                         ;;
                 esac
-            fi
+            done
             ;;
         type)
             case "$value" in
                 automatic|manual) ;;
                 *)
-                    echo "ERROR: [type] '$value' is not valid" >&2
+                    echo "ERROR: [type] '$value' is not valid (automatic | manual)" >&2
                     return 1
                     ;;
             esac
             ;;
         schedule)
             case "$value" in
-                daily|weekly|monthly|minutes*)
-                    if [[ "$value" == minutes* ]]; then
-                        local clock="${value#minutes}"
-                        if ! [[ "$clock" =~ ^[0-9]{2}:[0-9]{2}$ ]]; then
-                            echo "ERROR: [schedule] '$value' invalid format (use minutesHH:MM)" >&2
+                daily|weekly|monthly) ;;
+                minutes*)
+                    local clock="${value#minutes}"
+                    if [[ "$clock" =~ ^[0-9]{2}:[0-9]{2}$ ]]; then
+                        local hh="${clock%%:*}"
+                        local mm="${clock##*:}"
+                        if (( 10#$hh > 23 || 10#$mm > 59 )); then
+                            echo "ERROR: [schedule] '$value' out of range (HH 00-23, MM 00-59)" >&2
                             return 1
                         fi
+                    else
+                        echo "ERROR: [schedule] '$value' invalid format (use minutesHH:MM)" >&2
+                        return 1
                     fi
                     ;;
                 *)
-                    echo "ERROR: [schedule] '$value' is not valid" >&2
+                    echo "ERROR: [schedule] '$value' is not valid (daily | weekly | monthly | minutesHH:MM)" >&2
                     return 1
                     ;;
             esac
+            ;;
+        timeout_start_sec)
+            if [[ "$value" != "infinity" ]] && ! [[ "$value" =~ ^[0-9]+$ ]]; then
+                echo "ERROR: [timeout_start_sec] must be a number of seconds or 'infinity'" >&2
+                return 1
+            fi
             ;;
     esac
 
@@ -218,7 +318,8 @@ config_validate_value() {
 
 # ───────────────────────────────────────────────────────────────────────────────
 # config_validate
-# Validates that the configuration is correct and complete
+# Validates that every job has its required fields complete.
+# Per-value security validation already happened in config_load (fail-fast).
 # ───────────────────────────────────────────────────────────────────────────────
 config_validate() {
     local errors=0
@@ -235,20 +336,6 @@ config_validate() {
         local host=$(config_get_var "$section" "host")
         local remote_path=$(config_get_var "$section" "remote_path")
         local schedule=$(config_get_var "$section" "schedule")
-        local compression=$(config_get_var_or_global "$section" "compression")
-
-        config_validate_value "type" "$type" || ((errors++))
-        config_validate_value "host" "$host" || ((errors++))
-        config_validate_value "remote_path" "$remote_path" || ((errors++))
-        config_validate_value "schedule" "$schedule" || ((errors++))
-        config_validate_value "compression" "$compression" || ((errors++))
-
-        if [[ -n "$sources" ]]; then
-            local source
-            for source in $sources; do
-                config_validate_value "sources" "$source" || ((errors++))
-            done
-        fi
 
         if [[ -z "$type" ]]; then
             echo "ERROR: [$section] missing variable 'type'" >&2
@@ -283,6 +370,7 @@ config_validate() {
 
         if [[ -n "$sources" ]]; then
             local source
+            # Word-splitting intentional: sources is a space-separated path list.
             for source in $sources; do
                 if [[ ! -e "$source" ]]; then
                     echo "WARNING: [$section] source does not exist: $source" >&2
@@ -307,9 +395,10 @@ config_example_exists() {
 # Reloads the configuration from the file
 # ───────────────────────────────────────────────────────────────────────────────
 config_reload() {
-    unset CONFIG_GLOBAL CONFIG_JOBS CONFIG_SECTIONS
+    unset CONFIG_GLOBAL CONFIG_JOBS CONFIG_SECTIONS CONFIG_SECTION_SEEN
     declare -gA CONFIG_GLOBAL
     declare -gA CONFIG_JOBS
+    declare -gA CONFIG_SECTION_SEEN
     CONFIG_SECTIONS=()
 
     config_load "$COPYCROW_CONF"
@@ -319,6 +408,8 @@ config_reload() {
 # config_migrate
 # Converts a legacy (Spanish-key) copycrow.conf to the English-key format.
 # Creates a backup at copycrow.conf.bak before writing.
+# Legacy Spanish keys/values are intentionally allowed here WITHOUT the
+# whitelist check (that is exactly what this command migrates).
 # ───────────────────────────────────────────────────────────────────────────────
 config_migrate() {
     local conf_file="${COPYCROW_CONF}"
@@ -331,7 +422,7 @@ config_migrate() {
 
     echo "Migrating copycrow.conf to English v1.0.0 format..."
     cp "$conf_file" "${conf_file}.bak"
-    echo "  Backup saved: copycrow.conf.bak"
+    echo "  Backup saved: $(basename "$conf_file").bak"
 
     local tmp_file="${conf_file}.migrated"
 
@@ -365,7 +456,7 @@ config_migrate() {
                 line="${line/semanal/weekly}"
             elif [[ "$line" =~ ^[[:space:]]*[a-zA-Z_]+[[:space:]]*=[[:space:]]*mensual[[:space:]]*$ ]]; then
                 line="${line/mensual/monthly}"
-            elif [[ "$line" =~ ^[[:space:]]*[a-zA-Z_]+[[:space:]]*=[[:space:]]*minutos ]]; then
+            elif [[ "$line" =~ minutos[[:space:]]*=|^minutos ]]; then
                 line="${line/minutos/minutes}"
             fi
             printf '%s\n' "$line"

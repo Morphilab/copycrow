@@ -21,16 +21,21 @@ copycrow is designed with the following principles:
 
 1. **No credentials in code** — user configuration (`copycrow.conf`) is gitignored. All authentication is delegated to:
    - The system's `~/.ssh/config` for SSH
-   - `pass` (GPG-encrypted) for the Borg passphrase
-   - `BORG_PASSCOMMAND` (not persisted to plain disk)
+   - `pass` (GPG-encrypted) for the Borg passphrase, consumed via `BORG_PASSCOMMAND`
 
-2. **Input validation** — all `.conf` values are validated against dangerous characters (`;`, `&`, `|`, `$`, backticks, redirections) and path traversal (`..`) before use in commands.
+2. **Secrets never touch disk** — `BORG_PASSPHRASE` is **never** written anywhere by copycrow. Automation persists only non-secret data (`BORG_PASSCOMMAND` command string, `SSH_AUTH_SOCK` socket path) in `~/.config/copycrow/borg.env` with `0600` permissions inside a `0700` directory. The file is removed by `./copycrow.sh uninstall`.
 
-3. **Encryption at rest** — Borg repositories use `repokey` (key derived from passphrase) by default. The passphrase is never persisted as plaintext in systemd `.service` files — it is stored in `~/.config/copycrow/borg.env` with `0600` permissions.
+3. **Input validation, enforced end-to-end** — every configuration value is validated while loading (fail-fast): shell metacharacters are rejected, path traversal is blocked, `host` must be a well-formed SSH alias **without a leading dash** (blocking SSH option injection such as `-oProxyCommand=`), `retention` is restricted to `borg prune --keep-*` flag/number pairs, and `compression` / `type` / `schedule` are whitelist-checked. Required fields (`type`, `sources`, `host`, `remote_path`) are verified before any command performs work.
 
-4. **User isolation** — timers use `systemd --user`, no root elevation. Extracted files are automatically cleaned up when closing the TUI session.
+4. **Encryption at rest** — Borg repositories use `repokey` (key derived from passphrase) by default.
 
-5. **SSH hardening recommendation** — the documentation suggests a dedicated passphrase-less SSH key with `command="borg serve --restrict-to-path ..."` in the server's `authorized_keys` (see README).
+5. **Safe restores** — extracted archives require a sanitized archive name (charset-restricted, no traversal) and the target directory is resolved with `realpath` and contained inside the project mount directory; extractions run with `umask 077`.
+
+6. **Concurrent-safe** — job locks are created atomically (create-fail-if-exists), so two runs of the same job can never interleave.
+
+7. **User isolation** — timers use `systemd --user`, no root elevation.
+
+8. **SSH hardening recommendation** — the documentation suggests a dedicated passphrase-less SSH key with `command="borg serve --restrict-to-path ..."` in the server's `authorized_keys` (see README).
 
 ## Scope
 

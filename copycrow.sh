@@ -17,6 +17,20 @@ source "${COPYCROW_ROOT}/src/backup-core.sh"
 safety_init
 
 # ───────────────────────────────────────────────────────────────────────────────
+# _load_and_validate
+# Loads the configuration and enforces FULL validation before any command does
+# real work. Per-value security checks already ran inside config_load
+# (fail-fast); this adds required-field completeness (type/sources/host/path).
+# ───────────────────────────────────────────────────────────────────────────────
+_load_and_validate() {
+    config_load || return 1
+    if ! config_validate; then
+        echo "ERROR: Configuration validation failed. Fix the issues above and retry." >&2
+        return 1
+    fi
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
 # Help function
 # ───────────────────────────────────────────────────────────────────────────────
 show_help() {
@@ -124,7 +138,7 @@ cmd_backup() {
         return 1
     fi
 
-    if ! config_load; then
+    if ! _load_and_validate; then
         return 1
     fi
 
@@ -156,7 +170,7 @@ cmd_auto() {
         return 1
     fi
 
-    if ! config_load; then
+    if ! _load_and_validate; then
         return 1
     fi
 
@@ -181,7 +195,7 @@ cmd_dryrun() {
         return 1
     fi
 
-    if ! config_load; then
+    if ! _load_and_validate; then
         return 1
     fi
 
@@ -200,7 +214,7 @@ cmd_dryrun() {
 cmd_list() {
     local job="${1:-}"
 
-    if ! config_load; then
+    if ! _load_and_validate; then
         return 1
     fi
 
@@ -242,7 +256,7 @@ cmd_open() {
         return 1
     fi
 
-    if ! config_load; then
+    if ! _load_and_validate; then
         return 1
     fi
 
@@ -267,7 +281,7 @@ cmd_migrate() {
 cmd_install() {
     source "${COPYCROW_ROOT}/src/timer-generator.sh"
 
-    if ! config_load; then
+    if ! _load_and_validate; then
         return 1
     fi
 
@@ -297,7 +311,7 @@ cmd_status() {
         return 1
     fi
 
-    if ! config_load; then
+    if ! _load_and_validate; then
         return 1
     fi
 

@@ -19,6 +19,7 @@ mkdir -p "$LOCK_DIR" 2>/dev/null || true
 _cleanup() {
     local exit_code=$?
 
+    local tmp
     for tmp in "${TEMP_FILES[@]:-}"; do
         if [[ -f "$tmp" ]]; then
             rm -f "$tmp" 2>/dev/null || true
@@ -40,6 +41,7 @@ safety_init() {
     trap _cleanup EXIT
     trap 'echo ""; echo "Interrupted by user." >&2; exit 130' INT
     trap 'echo "Terminated." >&2; exit 143' TERM
+    trap 'echo "Hangup: session closed." >&2; exit 129' HUP
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -52,23 +54,29 @@ safety_add_temp() {
 
 # ───────────────────────────────────────────────────────────────────────────────
 # safety_lock_acquire
-# Acquires an exclusive lock for a job (non-blocking)
-# Returns 0 if acquired, 1 if already locked
+# Acquires an exclusive lock for a job (non-blocking).
+# Uses atomic create-fail-if-exists (noclobber) to avoid the check-then-create
+# TOCTOU race between concurrent invocations of the same job.
+# Returns 0 if acquired, 1 if already locked.
 # ───────────────────────────────────────────────────────────────────────────────
 safety_lock_acquire() {
     local job="$1"
     local lock_file="${LOCK_DIR}/copycrow-${job}.lock"
 
-    if [[ -f "$lock_file" ]]; then
-        local pid
-        pid=$(cat "$lock_file" 2>/dev/null || echo "")
+    if ! ( set -o noclobber; printf '%s\n' "$$" > "$lock_file" ) 2>/dev/null; then
+        # Lock file exists: is the holder still alive?
+        local pid=""
+        pid=$(cat "$lock_file" 2>/dev/null || true)
         if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
             return 1
         fi
-        rm -f "$lock_file"
+        # Stale lock: remove it and retry ONCE atomically.
+        rm -f "$lock_file" 2>/dev/null || true
+        if ! ( set -o noclobber; printf '%s\n' "$$" > "$lock_file" ) 2>/dev/null; then
+            return 1
+        fi
     fi
 
-    echo "$$" > "$lock_file"
     COPYCROW_LOCK_FILE="$lock_file"
     return 0
 }

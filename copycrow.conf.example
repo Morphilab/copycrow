@@ -40,6 +40,10 @@ mount_dir = .mnt
 # Log directory (relative to project)
 logs_dir = logs
 
+# Max duration of one automatic backup (systemd TimeoutStartSec).
+# Number of seconds or 'infinity'. Default: 3600.
+# timeout_start_sec = infinity
+
 # ───────────────────────────────────────────────────────────────────────────────
 # JOBS — Each [name] section defines a backup task
 #
@@ -48,7 +52,8 @@ logs_dir = logs
 #   sources     = space-separated paths (e.g. /home /etc /var/log)
 #   host        = SSH alias configured in ~/.ssh/config ("local" for local destinations)
 #   remote_path = path of the Borg repository on the server
-#   schedule    = daily | weekly | monthly | minutesHH:MM (for automatic jobs only)
+#   schedule    = daily | weekly | monthly | minutesHH:MM (automatic only;
+#                 minutesHH:MM means "every day at HH:MM", e.g. minutes06:30)
 #   retention   = specific retention policy (overrides global)
 #   compression = compression algorithm (overrides global)
 # ───────────────────────────────────────────────────────────────────────────────

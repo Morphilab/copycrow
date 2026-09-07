@@ -154,10 +154,20 @@ EOF
 }
 
 @test "config_validate_value: validates custom schedule format" {
-    run config_validate_value "schedule" "minutes99:99"
+    run config_validate_value "schedule" "minutesbad"
+    [ "$status" -ne 0 ]
+
+    run config_validate_value "schedule" "minutes23:59"
     [ "$status" -eq 0 ]
 
-    run config_validate_value "schedule" "minutesbad"
+    run config_validate_value "schedule" "minutes00:00"
+    [ "$status" -eq 0 ]
+
+    # Out-of-range values would be rejected by systemd OnCalendar at runtime
+    run config_validate_value "schedule" "minutes24:00"
+    [ "$status" -ne 0 ]
+
+    run config_validate_value "schedule" "minutes10:60"
     [ "$status" -ne 0 ]
 }
 
@@ -228,7 +238,7 @@ EOF
     [[ "$output" == *"host"* ]]
 }
 
-@test "config_validate: fails if remote_path is invalid" {
+@test "config_validate: rejects remote_path traversal at load time" {
     cat > /tmp/copycrow-test-10.conf << 'EOF'
 [global]
 
@@ -239,12 +249,11 @@ host = server
 remote_path = /backups/../etc
 EOF
 
-    config_load /tmp/copycrow-test-10.conf
-    run config_validate
+    run config_load /tmp/copycrow-test-10.conf
     [ "$status" -ne 0 ]
 }
 
-@test "config_validate: fails if schedule is invalid" {
+@test "config_validate: rejects invalid schedule at load time" {
     cat > /tmp/copycrow-test-11.conf << 'EOF'
 [global]
 
@@ -256,13 +265,12 @@ remote_path = /b
 schedule = every_5_minutes
 EOF
 
-    config_load /tmp/copycrow-test-11.conf
-    run config_validate
+    run config_load /tmp/copycrow-test-11.conf
     [ "$status" -ne 0 ]
     [[ "$output" == *"schedule"* ]]
 }
 
-@test "config_validate: fails if compression is invalid" {
+@test "config_validate: rejects invalid compression at load time" {
     cat > /tmp/copycrow-test-12.conf << 'EOF'
 [global]
 compression = no_such
@@ -274,13 +282,12 @@ host = server
 remote_path = /b
 EOF
 
-    config_load /tmp/copycrow-test-12.conf
-    run config_validate
+    run config_load /tmp/copycrow-test-12.conf
     [ "$status" -ne 0 ]
     [[ "$output" == *"compression"* ]]
 }
 
-@test "config_validate: fails if host contains dangerous characters" {
+@test "config_validate: rejects dangerous host at load time" {
     cat > /tmp/copycrow-test-13.conf << 'EOF'
 [global]
 
@@ -291,12 +298,11 @@ host = 'server;rm -rf /'
 remote_path = /b
 EOF
 
-    config_load /tmp/copycrow-test-13.conf
-    run config_validate
+    run config_load /tmp/copycrow-test-13.conf
     [ "$status" -ne 0 ]
 }
 
-@test "config_validate: fails if source contains path traversal" {
+@test "config_validate: rejects source path traversal at load time" {
     cat > /tmp/copycrow-test-14.conf << 'EOF'
 [global]
 
@@ -307,8 +313,7 @@ host = server
 remote_path = /b
 EOF
 
-    config_load /tmp/copycrow-test-14.conf
-    run config_validate
+    run config_load /tmp/copycrow-test-14.conf
     [ "$status" -ne 0 ]
 }
 
@@ -348,11 +353,148 @@ EOF
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
-# config_migrate — legacy config conversion
+# Hardening v1.0.1 — host regex, retention whitelist, key whitelist, fail-fast
+# ───────────────────────────────────────────────────────────────────────────────
+
+@test "host: rejects leading dash (SSH option injection)" {
+    run config_validate_value "host" "-oProxyCommand=evil"
+    [ "$status" -ne 0 ]
+}
+
+@test "host: accepts well-formed aliases and 'local'" {
+    for h in nas-backup my.server.local local 192.168.1.100; do
+        run config_validate_value "host" "$h"
+        [ "$status" -eq 0 ] || return 1
+    done
+}
+
+@test "retention: accepts only --keep-* flag/number pairs" {
+    run config_validate_value "retention" "--keep-daily 7 --keep-weekly 4"
+    [ "$status" -eq 0 ]
+
+    run config_validate_value "retention_default" "--keep-monthly 6"
+    [ "$status" -eq 0 ]
+
+    run config_validate_value "retention" "--prefix evil"
+    [ "$status" -ne 0 ]
+
+    run config_validate_value "retention" "; rm -rf /"
+    [ "$status" -ne 0 ]
+}
+
+@test "timeout_start_sec: numeric or infinity only" {
+    run config_validate_value "timeout_start_sec" "3600"
+    [ "$status" -eq 0 ]
+    run config_validate_value "timeout_start_sec" "infinity"
+    [ "$status" -eq 0 ]
+    run config_validate_value "timeout_start_sec" "one-hour"
+    [ "$status" -ne 0 ]
+}
+
+@test "config_load: rejects unknown keys (whitelist)" {
+    cat > /tmp/copycrow-test-wl.conf << 'EOF'
+[global]
+compression = lz4
+
+[job_x]
+type = manual
+sourcez = /home
+EOF
+    run config_load /tmp/copycrow-test-wl.conf
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"unknown key"* ]]
+}
+
+@test "config_load: fails fast on invalid values (anti-injection active in load)" {
+    cat > /tmp/copycrow-test-ff.conf << 'EOF'
+[global]
+compression = not-real
+EOF
+    run config_load /tmp/copycrow-test-ff.conf
+    [ "$status" -ne 0 ]
+}
+
+@test "config_load: strips trailing inline comments on unquoted values" {
+    cat > /tmp/copycrow-test-cm.conf << 'EOF'
+[global]
+compression = lz4 # fast default
+auto_prefix = auto-
+EOF
+    config_load /tmp/copycrow-test-cm.conf
+    [ "$(config_get_global compression)" = "lz4" ]
+    [ "$(config_get_global auto_prefix)" = "auto-" ]
+}
+
+@test "config_load: duplicate sections are ignored with warning" {
+    cat > /tmp/copycrow-test-ds.conf << 'EOF'
+[global]
+compression = lz4
+
+[job_a]
+type = manual
+
+[job_a]
+type = automatic
+sources = /home
+host = server
+remote_path = /a
+EOF
+    # Bare call (stderr → file): keeps array state in THIS shell while
+    # still letting us assert on the warning text.
+    local warn_file="/tmp/copycrow-ds-warn-$$"
+    config_load /tmp/copycrow-test-ds.conf 2> "$warn_file"
+    grep -q "duplicate section" "$warn_file"
+    # First definition wins; the duplicate body is dropped entirely.
+    [ "$(config_get_var job_a type)" = "manual" ]
+    [ -z "$(config_get_var job_a sources)" ]
+    rm -f "$warn_file"
+}
+
+@test "compound keys: near-colliding job names stay independent" {
+    cat > /tmp/copycrow-test-cl.conf << 'EOF'
+[global]
+
+[my]
+type = manual
+sources = /home
+host = server-a
+remote_path = /a
+
+[my_sub]
+type = manual
+sources = /var
+host = server-b
+remote_path = /b
+EOF
+    config_load /tmp/copycrow-test-cl.conf
+    [ "$(config_get_var my host)" = "server-a" ]
+    [ "$(config_get_var my_sub host)" = "server-b" ]
+}
+
+@test "config_load: repeated loads do not accumulate sections" {
+    cat > /tmp/copycrow-test-rl.conf << 'EOF'
+[global]
+compression = lz4
+
+[job_once]
+type = manual
+sources = /home
+host = server
+remote_path = /a
+EOF
+    config_load /tmp/copycrow-test-rl.conf
+    config_load /tmp/copycrow-test-rl.conf
+    config_load /tmp/copycrow-test-rl.conf
+    [ "${#CONFIG_SECTIONS[@]}" -eq 1 ]
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# config_migrate — legacy config conversion (sandboxed: never touches project conf)
 # ───────────────────────────────────────────────────────────────────────────────
 
 @test "config_migrate: converts Spanish keys to English" {
-    cat > "${COPYCROW_ROOT}/copycrow.conf" << 'EOF'
+    export COPYCROW_CONF="$(mktemp /tmp/copycrow-migrate-XXXXXX.conf)"
+    cat > "$COPYCROW_CONF" << 'EOF'
 [global]
 retencion_default = --keep-daily 7
 compresion = lz4
@@ -372,7 +514,7 @@ EOF
     run config_migrate
     [ "$status" -eq 0 ]
 
-    config_load "${COPYCROW_ROOT}/copycrow.conf"
+    config_load "$COPYCROW_CONF"
 
     [ "$(config_get_global retention_default)" = "--keep-daily 7" ]
     [ "$(config_get_global compression)" = "lz4" ]
@@ -386,23 +528,25 @@ EOF
     [ "$(config_get_var job_diario schedule)" = "daily" ]
     [ "$(config_get_var job_diario retention)" = "--keep-daily 7 --keep-weekly 4" ]
 
-    rm -f "${COPYCROW_ROOT}/copycrow.conf" "${COPYCROW_ROOT}/copycrow.conf.bak"
+    rm -f "$COPYCROW_CONF" "${COPYCROW_CONF}.bak"
 }
 
 @test "config_migrate: backup is created" {
-    cat > "${COPYCROW_ROOT}/copycrow.conf" << 'EOF'
+    export COPYCROW_CONF="$(mktemp /tmp/copycrow-migrate-XXXXXX.conf)"
+    cat > "$COPYCROW_CONF" << 'EOF'
 [global]
 compresion = lz4
 EOF
 
     config_migrate
-    [ -f "${COPYCROW_ROOT}/copycrow.conf.bak" ]
+    [ -f "${COPYCROW_CONF}.bak" ]
 
-    rm -f "${COPYCROW_ROOT}/copycrow.conf" "${COPYCROW_ROOT}/copycrow.conf.bak"
+    rm -f "$COPYCROW_CONF" "${COPYCROW_CONF}.bak"
 }
 
 @test "config_migrate: reports if already in English" {
-    cat > "${COPYCROW_ROOT}/copycrow.conf" << 'EOF'
+    export COPYCROW_CONF="$(mktemp /tmp/copycrow-migrate-XXXXXX.conf)"
+    cat > "$COPYCROW_CONF" << 'EOF'
 [global]
 compression = lz4
 EOF
@@ -411,5 +555,5 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"already in English"* ]]
 
-    rm -f "${COPYCROW_ROOT}/copycrow.conf"
+    rm -f "$COPYCROW_CONF" "${COPYCROW_CONF}.bak"
 }

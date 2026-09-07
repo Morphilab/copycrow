@@ -39,7 +39,7 @@ __pycache__/
 *.tar.gz
 *.zip
 *.backup
-backup-*
+/backup-*
 
 # ================== Seguridad ==================
 # Ignorar cualquier archivo que contenga "key", "secret", "password", etc.
