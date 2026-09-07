@@ -14,7 +14,8 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 
 setup() {
-    export COPYCROW_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
+    local real_root
+    real_root="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
     export COPYCROW_TEST_SANDBOX="$(mktemp -d /tmp/copycrow-tui-XXXXXX)"
     export HOME="${COPYCROW_TEST_SANDBOX}/home"
     mkdir -p "$HOME"
@@ -62,6 +63,16 @@ host = local
 remote_path = /tmp/repo
 schedule = daily
 EOF
+
+    # tui_main refuses to run without ${COPYCROW_ROOT}/copycrow.conf — a
+    # gitignored file that only exists on dev machines. Mirror the tree into
+    # the sandbox so the guard is satisfied on every environment.
+    export COPYCROW_ROOT="${COPYCROW_TEST_SANDBOX}/projroot"
+    mkdir -p "$COPYCROW_ROOT"
+    ln -s "${real_root}/copycrow.sh" "${COPYCROW_ROOT}/copycrow.sh"
+    ln -s "${real_root}/copycrow.conf.example" "${COPYCROW_ROOT}/copycrow.conf.example"
+    ln -s "${real_root}/src" "${COPYCROW_ROOT}/src"
+    cp "$COPYCROW_CONF" "${COPYCROW_ROOT}/copycrow.conf"
 
     source "${COPYCROW_ROOT}/src/config-parser.sh"
     config_load "$COPYCROW_CONF"

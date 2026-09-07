@@ -9,6 +9,9 @@ setup() {
     export COPYCROW_TEST_SANDBOX="$(mktemp -d /tmp/copycrow-timer-XXXXXX)"
     export HOME="${COPYCROW_TEST_SANDBOX}/home"
     mkdir -p "$HOME"
+    # CI runners export XDG_CONFIG_HOME globally; pin it into the sandbox so
+    # generated units land where the assertions look, on every machine.
+    export XDG_CONFIG_HOME="${HOME}/.config"
     unset BORG_PASSPHRASE BORG_PASSCOMMAND SSH_AUTH_SOCK
 
     source "${COPYCROW_ROOT}/src/config-parser.sh"

@@ -76,6 +76,16 @@ STUB
 exit 0
 STUB
 
+    # borg is stubbed like every other external: the binary check must not
+    # depend on what the host happens to have installed.
+    cat > "${STUB_BIN}/borg" << 'STUB'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+    printf 'borg %s\n' "${STUB_BORG_VERSION:-1.2.8}"
+fi
+exit 0
+STUB
+
     chmod +x "${STUB_BIN}/"* 2>/dev/null
     export PATH="${STUB_BIN}:${PATH}"
 
