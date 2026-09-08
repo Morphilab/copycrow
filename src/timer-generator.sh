@@ -5,17 +5,14 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-# Project root directory
 COPYCROW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # systemd user directory (resolved per call: honors XDG_CONFIG_HOME, which
-# systemd itself uses to locate user units — hardcoding $HOME/.config broke
-# installs for users with a custom XDG config home)
+# systemd itself uses to locate user units)
 _systemd_user_dir() {
     printf '%s\n' "${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
 }
 
-# copycrow timer prefix
 TIMER_PREFIX="copycrow"
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -212,7 +209,7 @@ timer_generate_verify() {
     sdir="$(_systemd_user_dir)"
     mkdir -p "$sdir"
 
-    # Same conf-propagation rule as job units (B4): timers must read the SAME
+    # Same conf-propagation rule as job units: timers must read the SAME
     # conf they were installed from.
     local conf_env_line=""
     if [[ -n "${COPYCROW_CONF:-}" && "${COPYCROW_CONF}" != "${COPYCROW_ROOT}/copycrow.conf" ]]; then

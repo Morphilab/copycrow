@@ -4,14 +4,14 @@
 
 | Version | Supported     |
 |---------|---------------|
-| 1.0.x   | ✅ Active     |
-| < 1.0   | ❌ End of life|
+| 1.3.x   | ✅ Active     |
+| < 1.3   | ❌ End of life|
 
 ## Reporting a Vulnerability
 
 If you discover a security vulnerability in copycrow, please **DO NOT open a public issue**. Send a private report via:
 
-- **Email**: [reports@morphilab.com] 
+- **GitHub Security Advisories**: [Report a vulnerability](https://github.com/morphilab/copycrow/security/advisories/new)
 
 You will receive a response within 72 hours.
 

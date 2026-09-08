@@ -4,7 +4,7 @@
 # Offsite replication of LOCAL borg repositories to Proton Drive through the
 # OFFICIAL `proton-drive` CLI (v0.8+, browser OAuth + OS keyring session).
 # ═══════════════════════════════════════════════════════════════════════════════
-# Contract (spec: docs/superpowers/specs/2026-08-26-protondrive-sync-design.md):
+# Contract:
 #   * Opt-in per job via `cloud_remote`; [global] cloud_cli_path overrides PATH.
 #   * Incremental upload driven ONLY by the local manifest
 #     (${XDG_CACHE_HOME:-~/.cache}/copycrow/cloud/<job>.manifest):
@@ -109,7 +109,7 @@ _cloud_exec() {
 # _cloud_manifest_load / _cloud_manifest_save
 # Populate/dump _CLOUD_SEEN atomically. Save rewrites via mktemp+mv so a crash
 # mid-write can never truncate previously-known-good state.
-# NOTE: TSV cannot represent tab/newline characters inside relpaths; the upload engine (Task 3 contract) must SKIP such files rather than encode them.
+# NOTE: TSV cannot represent tab/newline characters inside relpaths; the upload engine must SKIP such files rather than encode them.
 # ───────────────────────────────────────────────────────────────────────────────
 _cloud_manifest_load() {
     _CLOUD_SEEN=()

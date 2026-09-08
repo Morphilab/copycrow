@@ -6,10 +6,8 @@
 
 set -euo pipefail
 
-# Project root directory
 COPYCROW_ROOT="$(cd "$(dirname "$0")" && pwd)"
 
-# Load modules
 source "${COPYCROW_ROOT}/src/config-parser.sh"
 source "${COPYCROW_ROOT}/src/safety.sh"
 source "${COPYCROW_ROOT}/src/backup-core.sh"
@@ -65,8 +63,8 @@ Examples:
   ./copycrow.sh backup daily_job      # Manual backup
   ./copycrow.sh dryrun daily_job      # Simulate backup (writes nothing)
   ./copycrow.sh auto daily_job        # Automatic backup
-   ./copycrow.sh list                  # List all backups
-   ./copycrow.sh verify daily_job      # Integrity check (writes nothing)
+  ./copycrow.sh list                  # List all backups
+  ./copycrow.sh verify daily_job      # Integrity check (writes nothing)
   ./copycrow.sh migrate               # Convert old config
   ./copycrow.sh install               # Install timers
 
@@ -446,8 +444,7 @@ cmd_status() {
     echo "copycrow — System Status"
     echo "══════════════════════════"
 
-    # Honor the COPYCROW_CONF override like every other command (the old
-    # hardcoded ROOT path broke status for custom conf locations).
+    # Honor the COPYCROW_CONF override like every other command.
     local active_conf="${COPYCROW_CONF:-${COPYCROW_ROOT}/copycrow.conf}"
     if [[ ! -f "$active_conf" ]]; then
         echo ""
@@ -486,8 +483,7 @@ main() {
 
     case "$command" in
         init|migrate|install|uninstall|status|doctor)
-            # Uniform arity: these take no operands (commit b6e7694 covered
-            # only operand-taking commands).
+            # Uniform arity: these take no operands.
             if [[ $# -gt 1 ]]; then
                 echo "ERROR: Too many arguments (command '$command' takes none)" >&2
                 return 1

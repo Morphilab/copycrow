@@ -8,10 +8,8 @@
 #                whiptail --menu which expects "key" "desc" "key" "desc" pairs.
 set -euo pipefail
 
-# Project root directory
 COPYCROW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Load configuration only if the file exists
 if [[ -z "${CONFIG_LOADED:-}" ]]; then
     source "${COPYCROW_ROOT}/src/config-parser.sh"
     if [[ -f "${COPYCROW_ROOT}/copycrow.conf" ]]; then
@@ -42,7 +40,7 @@ tui_main() {
     fi
 
     # Backend calls made from this menu must never show raw interactive
-    # prompts over the whiptail UI (B10).
+    # prompts over the whiptail UI.
     export COPYCROW_UNDER_TUI=1
 
     while true; do
@@ -66,7 +64,7 @@ tui_main() {
 
         case "$option" in
             # Handlers report failures through dialogs and may return nonzero;
-            # `|| true` keeps the menu loop alive (A4 hardening).
+            # `|| true` keeps the menu loop alive.
             1) tui_create_backup || true ;;
             2) tui_dryrun_backup || true ;;
             3) tui_list_jobs || true ;;
@@ -89,8 +87,7 @@ tui_main() {
 
 # ───────────────────────────────────────────────────────────────────────────────
 # tui_list_jobs
-# Shows all configured jobs with their full definition (wired into the main
-# menu since the P2-15 parity round; it used to be dead code).
+# Shows all configured jobs with their full definition.
 # ───────────────────────────────────────────────────────────────────────────────
 tui_list_jobs() {
     if [[ ${#CONFIG_SECTIONS[@]} -eq 0 ]]; then
@@ -142,7 +139,7 @@ tui_dryrun_backup() {
     fi
 
     # Convention-compliant capture: dry-run is quiet and fast, so $( ) with
-    # explicit rc keeps the TUI alive on validation errors (A4).
+    # explicit rc keeps the TUI alive on validation errors.
     local out="" rc=0
     out="$(backup_create "$selection" "manual" "true" 2>&1)" || rc=$?
     if (( rc == 0 )); then
@@ -548,7 +545,7 @@ tui_manage_timers() {
 # ───────────────────────────────────────────────────────────────────────────────
 # tui_sync_job
 # Picks a cloud-enabled job and replicates it under the job's lock (same
-# contract as ./copycrow.sh sync <job>). Parity requirement P2-15 style.
+# contract as ./copycrow.sh sync <job>).
 # ───────────────────────────────────────────────────────────────────────────────
 tui_sync_job() {
     local -a menu_args=()

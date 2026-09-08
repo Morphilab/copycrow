@@ -5,13 +5,11 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-# Project root directory
 COPYCROW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Configuration file (overridable via environment for sandboxes/tests)
 COPYCROW_CONF="${COPYCROW_CONF:-${COPYCROW_ROOT}/copycrow.conf}"
 
-# Associative arrays for config storage
 declare -gA CONFIG_GLOBAL
 declare -gA CONFIG_JOBS
 
@@ -592,7 +590,7 @@ config_migrate() {
             elif [[ "$line" =~ minutos[[:space:]]*=|^minutos ]]; then
                 line="${line/minutos/minutes}"
             elif [[ "$line" =~ ^[[:space:]]*[a-zA-Z_]+[[:space:]]*=[[:space:]]*minutos[0-9]{2}:[0-9]{2}[[:space:]]*$ ]]; then
-                # P0-2: the key rename pass turns `frecuencia = minutos08:30`
+                # The key rename pass turns `frecuencia = minutos08:30`
                 # into `schedule = minutos08:30`, which the generic branch
                 # above never matched (no '=' right after 'minutos') and the
                 # whitelist then rejected. Rewrite the whole inline value.

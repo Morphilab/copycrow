@@ -51,7 +51,7 @@ teardown() {
 
 @test "_copycrow_hosts: distinct hosts only" {
     run _copycrow_hosts
-    # nas (x2) + other → dedup deja 2
+    # nas (x2) + other → dedup leaves 2
     [ "$(grep -c . <<< "$output")" -eq 2 ]
     grep -qx "nas" <<< "$output"
     grep -qx "other" <<< "$output"

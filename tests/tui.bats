@@ -95,9 +95,9 @@ teardown() {
 }
 
 @test "tui_create_backup: menu args are clean tag/desc pairs (no literal quotes)" {
-    # P1-6: los args se construían como string con comillas embebidas y se
-    # expandían sin quoting → comillas literales en el argv de whiptail y
-    # conteo impar de items con un solo job (menú muerto en borg real).
+    # Menu args must be clean argv pairs: embedded quotes or an odd item
+    # count would put literal quotes in whiptail's argv (broken menu with
+    # a single job).
     local rc=0
     FAKE_CHOICE=timer_job tui_create_backup > /dev/null 2>&1 || rc=$?
 
@@ -114,7 +114,7 @@ teardown() {
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Paridad TUI↔CLI (roadmap P2-15)
+# TUI↔CLI parity
 # ───────────────────────────────────────────────────────────────────────────────
 
 @test "tui_main: menu offers dry-run, jobs, verify, doctor and migrate (parity)" {
@@ -128,7 +128,7 @@ teardown() {
     [[ "$menu_line" == *"Migrate legacy configuration"* ]]
 }
 
-@test "tui_list_jobs: renders every job's fields (dead code now wired)" {
+@test "tui_list_jobs: renders every job's fields" {
     FAKE_CHOICE="" tui_list_jobs >/dev/null 2>&1 || true
     grep -q "timer_job" "$TUI_LOG"
     grep -q "schedule: daily" "$TUI_LOG"

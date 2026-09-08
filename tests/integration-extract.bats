@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # ═══════════════════════════════════════════════════════════════════════════════
 # Integration tests: backup_extract against REAL borg.
-# The unit suite stubs borg, which historically masked argument bugs (P0-1).
+# The unit suite stubs borg, which can mask argument bugs.
 # These tests exercise the actual binary. Skipped when borg is not installed.
 #
 # Isolation: modules are COPIED into the sandbox so COPYCROW_ROOT (and hence
@@ -58,7 +58,7 @@ teardown() {
     rm -rf "${COPYCROW_TEST_SANDBOX:-}"
 }
 
-@test "backup_extract: extracts archive contents with real borg (P0-1)" {
+@test "backup_extract: extracts archive contents with real borg" {
     run backup_extract "local" "manual-20260101-000000"
     [ "$status" -eq 0 ]
     [ -f "${COPYCROW_ROOT}/.mnt/manual-20260101-000000/data/archivo.txt" ]
@@ -71,6 +71,6 @@ teardown() {
     [ -f "$f" ]
     local mode
     mode="$(stat -c '%a' "$f")"
-    # No bit de lectura para "otros" en el modo octal del archivo.
+    # No read bit for "others" in the file's octal mode.
     (( (8#$mode & 8#4) == 0 ))
 }

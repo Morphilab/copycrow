@@ -142,7 +142,7 @@ EOF
     run timer_generate "timer_job"
     [ "$status" -eq 0 ]
 
-    # Las units deben caer bajo el XDG del usuario, no en $HOME/.config fijo.
+    # Units must land under the user's XDG dir, not a hardcoded $HOME/.config.
     [ -f "${XDG_CONFIG_HOME}/systemd/user/copycrow-timer_job.service" ]
     [ ! -e "${HOME}/.config/systemd/user/copycrow-timer_job.service" ]
 }
@@ -161,7 +161,7 @@ EOF
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Timer programable de verificación (roadmap P3-19 parte 2)
+# Programmable verify timer
 # ───────────────────────────────────────────────────────────────────────────────
 
 _stub_systemctl() {

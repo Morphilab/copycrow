@@ -68,7 +68,7 @@ EOF
 
 @test "backup_build_repo_url: remote host builds ABSOLUTE ssh URL (double slash)" {
     # borg treats ssh://host/path as RELATIVE to the remote home; absolute
-    # requires the double slash (P1-4: validation demands /abs paths, so the
+    # requires the double slash (validation demands /abs paths, so the
     # URL must preserve absoluteness).
     run backup_build_repo_url "nas-backup" "/backups/copycrow/daily"
     [ "$output" = "ssh://nas-backup//backups/copycrow/daily" ]
@@ -89,7 +89,7 @@ EOF
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
-# backup_get_repo_urls_for_host (M3: all repos per host, not just the first)
+# backup_get_repo_urls_for_host (all repos per host, not just the first)
 # ───────────────────────────────────────────────────────────────────────────────
 
 @test "backup_get_repo_urls_for_host: returns every distinct repo of a host" {
@@ -163,7 +163,7 @@ EOF
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Failure-path handling (H4): borg failures must never kill the process.
+# Failure-path handling: borg failures must never kill the process.
 # ───────────────────────────────────────────────────────────────────────────────
 
 @test "backup_prune: borg failure is logged and non-fatal" {
@@ -214,7 +214,7 @@ EOF
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Log retention (roadmap P2-13 / hallazgo B5)
+# Log retention
 # ───────────────────────────────────────────────────────────────────────────────
 
 _make_old_log() {
@@ -288,7 +288,7 @@ EOF
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
-# B9: una sola línea Retention en dryrun · C6: dedup de listado multi-repo
+# Dry-run prints a single Retention line; multi-repo listing is deduplicated
 # ───────────────────────────────────────────────────────────────────────────────
 
 @test "dryrun: exactly one Retention line — job override wins" {
@@ -326,7 +326,7 @@ EOF
     [[ "$output" == *"(default: --keep-daily 7)"* ]]
 }
 
-@test "backup_list: deduplicates archives present in several repos of one host (C6)" {
+@test "backup_list: deduplicates archives present in several repos of one host" {
     _stub_borg 0
     cat > "${PATH_STUB_DIR}/borg" << 'STUB'
 #!/usr/bin/env bash
@@ -387,7 +387,7 @@ EOF
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
-# on_failure_cmd hook (roadmap P3-20)
+# on_failure_cmd hook
 # ───────────────────────────────────────────────────────────────────────────────
 
 _make_hook_recorder() {

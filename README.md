@@ -1,9 +1,9 @@
 # CopyCrow
 
-[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](https://github.com/morphilab/copycrow)
+[![Version](https://img.shields.io/badge/version-1.3.0-blue.svg)](https://github.com/morphilab/copycrow)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Bash](https://img.shields.io/badge/bash-4%2B-orange.svg)](https://www.gnu.org/software/bash/)
-[![Tests](https://img.shields.io/badge/tests-145%2F145%20passing-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-196%2F196%20passing-brightgreen.svg)](tests/)
 [![ShellCheck](https://img.shields.io/badge/shellcheck-0%20issues-brightgreen.svg)](.shellcheckrc)
 
 Automated and manual backup system based on **Borg Backup** with a terminal interface (TUI) and native **systemd** timers.
@@ -33,13 +33,10 @@ Automated and manual backup system based on **Borg Backup** with a terminal inte
 - **Log retention** — `[global] logs_retention_days` auto-purges old JSON logs (default 30)
 - **Bash completion** — commands, job names and hosts (`completions/copycrow.bash`)
 
-## ⚠️ AI Disclosure / Divulgación de IA
+## ⚠️ AI Disclosure
 
-**English:**  
 This project was developed with assistance from artificial intelligence tools. Given the automated nature of some components, users are advised to review and test the code independently before integrating it into their own systems.
 
-**Español:**  
-Este proyecto fue desarrollado con asistencia de herramientas de inteligencia artificial. Dada la naturaleza automatizada de algunos componentes, se recomienda que los usuarios revisen y prueben el código independientemente antes de integrarlo en sus propios sistemas.
 ## Requirements
 
 | Dependency  | Installation                          |
@@ -185,17 +182,20 @@ ssh-add ~/.ssh/id_ed25519
 ./copycrow.sh                       # Open interactive menu (TUI)
 ./copycrow.sh init                  # Initial setup
 ./copycrow.sh backup <job>          # Manual backup of a job
+./copycrow.sh manual <job>          # Alias of backup
 ./copycrow.sh auto <job>            # Automatic backup (used by timers)
 ./copycrow.sh dryrun <job>          # Simulate backup (writes nothing)
 ./copycrow.sh list [job]            # List backups
 ./copycrow.sh open <host> <arch>    # Extract and open container
 ./copycrow.sh verify <job>          # Repository integrity check (borg check)
 ./copycrow.sh verify-all            # Verify every configured repository
+./copycrow.sh sync <job>            # Replicate a local repo to Proton Drive
 ./copycrow.sh doctor                # One-shot system health check
 ./copycrow.sh migrate               # Convert legacy config to English v1.0.0
 ./copycrow.sh install               # Install systemd timers
 ./copycrow.sh uninstall             # Remove timers
 ./copycrow.sh status                # System status
+./copycrow.sh --version             # Print version
 ./copycrow.sh help                  # Help
 ```
 
@@ -219,7 +219,7 @@ and receives context via environment variables:
 A failing hook is logged but never alters the backup's own result.
 
 **Keep logs under control:** `logs_retention_days = 30` in `[global]` purges
-`logs/copycrow-*.json` older than N days automatically after each backup.
+`logs/copycrow-*.log` older than N days automatically after each backup.
 
 ## Offsite backups to Proton Drive (optional)
 
@@ -311,7 +311,8 @@ copycrow/
 │   ├── backup-core.sh       ← Borg wrapper + JSON logs
 │   ├── timer-generator.sh   ← systemd timers
 │   ├── doctor.sh            ← health check
-│   └── tui.sh               ← whiptail menus
+│   ├── tui.sh               ← whiptail menus
+│   └── cloud-sync.sh        ← Proton Drive offsite replication
 ├── completions/
 │   └── copycrow.bash        ← bash completion
 ├── tests/                   ← bats-core tests
@@ -340,7 +341,7 @@ bats tests/
 ## Linting
 
 ```bash
-shellcheck -x copycrow.sh src/*.sh
+shellcheck -x copycrow.sh src/*.sh completions/copycrow.bash
 ```
 
 ## Automatic Timers

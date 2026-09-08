@@ -122,8 +122,8 @@ safety_lock_run() {
         return 1
     fi
 
-    # Convention-compliant capture: the previous `cmd; rc=$?` form was dead
-    # code under set -e (release depended on the EXIT trap, not design).
+    # Convention-compliant capture: explicit rc so a failing command cannot
+    # abort the function before the lock is released.
     local rc=0
     "$@" || rc=$?
     safety_lock_release

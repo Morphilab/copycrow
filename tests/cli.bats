@@ -121,8 +121,8 @@ EOF
 }
 
 @test "arity: no-operand commands reject surplus arguments" {
-    # P2-11: el claim de aridad era selectivo; init/migrate/install/uninstall/
-    # status ignoraban argumentos sobrantes en silencio.
+    # Arity enforcement must be uniform, not selective: no command silently
+    # ignores surplus arguments.
     local cmd
     for cmd in status install uninstall init; do
         run "${COPYCROW_ROOT}/copycrow.sh" "$cmd" SURPLUS_ARG
@@ -132,14 +132,14 @@ EOF
 }
 
 @test "status: honors COPYCROW_CONF override" {
-    # P2-12: cmd_status comprobaba ${COPYCROW_ROOT}/copycrow.conf hardcodeado.
+    # status must read the COPYCROW_CONF override, not a hardcoded path.
     run env COPYCROW_CONF="$COPYCROW_CONF" "${COPYCROW_ROOT}/copycrow.sh" status
     [ "$status" -eq 0 ]
     [[ "$output" == *"dry_job"* ]]
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
-# verify / verify-all (roadmap P3-19)
+# verify / verify-all
 # ───────────────────────────────────────────────────────────────────────────────
 
 _make_borg_recorder() {

@@ -32,7 +32,7 @@ teardown() {
     [ "$status" -ne 0 ]
 }
 
-@test "safety_lock_acquire: detects stale lock (dead PID)" {
+@test "safety_lock_acquire: succeeds over a stale lock file (PID is diagnostic only)" {
     echo "99999" > "${LOCK_DIR}/copycrow-test_job.lock"
     run safety_lock_acquire "test_job"
     [ "$status" -eq 0 ]
@@ -83,9 +83,9 @@ teardown() {
     : > "$dir/overlaps"
     export LOCK_DIR="$dir"
 
-    # Oráculo independiente (flock sobre serial.lock): puede haber varios
-    # ganadores SECUENCIALES legítimos (cada lock se libera al salir), pero
-    # NUNCA dos holders simultáneos.
+    # Independent oracle (flock on serial.lock): several SEQUENTIAL winners
+    # are legitimate (each lock is released on exit), but NEVER two
+    # simultaneous holders.
     local i
     for i in {1..20}; do
         (
@@ -124,17 +124,17 @@ teardown() {
     : > "$dir/overlaps"
     export LOCK_DIR="$dir"
 
-    # PID muerto real (reaped): el lock es indiscutiblemente huérfano.
+    # Real reaped dead PID: the lock is undeniably orphaned.
     bash -c 'exit 0' &
     local dead_pid=$!
     wait "$dead_pid"
     printf '%s\n' "$dead_pid" > "${dir}/copycrow-stale_job.lock"
 
-    # Puerta de salida: los 25 corredores compiten en el mismo instante.
-    # Oráculo de solapamiento INDEPENDIENTE del mecanismo del producto:
-    # cada ganador toma flock exclusivo sobre serial.lock; si dos ganadores
-    # se solapan, flock -n falla y queda registrado. Llegadas tardías tras
-    # un release legítimo serializan sin falsos positivos.
+    # Start gate: all 25 racers compete at the same instant.
+    # Overlap oracle INDEPENDENT of the product's mechanism: each winner
+    # takes an exclusive flock on serial.lock; if two winners overlap,
+    # flock -n fails and gets recorded. Late arrivals after a legitimate
+    # release serialize without false positives.
     local gate_go="${dir}.go"
     rm -f "$gate_go"
     local i

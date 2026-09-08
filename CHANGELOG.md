@@ -2,6 +2,40 @@
 
 All notable changes to copycrow are documented here.
 
+## 1.3.0 — 2026-09-04
+
+Offsite replication to Proton Drive, plus a documentation and comment
+hygiene round.
+
+### Added
+- **sync <job>**: replicate LOCAL repositories (`host = local`) to
+  [Proton Drive](https://proton.me/drive) via the official `proton-drive`
+  CLI. Opt-in per job with `cloud_remote`; `[global] cloud_cli_path`
+  overrides the binary location.
+- Incremental upload engine driven by a local manifest
+  (`~/.cache/copycrow/cloud/<job>.manifest`): unchanged files (size+mtime)
+  are skipped, rewritten files use "replace"; a failed run never updates
+  the manifest, so the next run retries everything.
+- Headless support: CLI calls are wrapped in `dbus-run-session` when no
+  graphical session exists; `COPYCROW_CLOUD_WRAP` overrides the wrapper
+  (deterministic runs/tests).
+- **doctor**: Proton Drive checks (binary, D-Bus wrapper, session).
+- TUI: "Sync job to Proton Drive" entry (CLI parity).
+
+### Changed
+- Comments and test names cleaned for release: internal audit round IDs,
+  commit hashes and process narration removed; test comments unified to
+  English per the language policy.
+- `.gitignore` repaired: `logs/.gitkeep` is now actually tracked; local
+  tooling files (`opencode.json`, `.zcode/`) are ignored by the versioned
+  `.gitignore`, not just machine-local excludes.
+
+### Fixed
+- README accuracy: log purge glob is `copycrow-*.log` (not `.json`),
+  `src/cloud-sync.sh` added to the project structure, test badge count,
+  and the usage section now lists `manual`, `sync` and `--version`.
+- Help text alignment in the CLI.
+
 ## 1.2.0 — 2026-08-24
 
 Roadmap round from the full project audit: reliability ("gold standard"
@@ -26,15 +60,15 @@ backup practices) plus complete CLI↔TUI parity.
 
 ### Fixed
 - `dryrun` printed a duplicated/empty Retention line when the job had no
-  retention of its own (B9).
+  retention of its own.
 - `list` showed duplicate archives when one archive existed in two repos of
-  the same host (C6).
-- Raw interactive prompts can never appear over the TUI anymore (B10):
+  the same host.
+- Raw interactive prompts can never appear over the TUI anymore:
   backend helpers consult a `COPYCROW_UNDER_TUI` flag set by the menu loop.
 
 ### Changed
 - TUI now exposes dry-run, configured-jobs detail, verify, doctor and migrate
-  (full CLI↔TUI parity; previously dead `tui_list_jobs` is wired in).
+  (extended CLI↔TUI parity; previously dead `tui_list_jobs` is wired in).
 - CI lints the completion script and runs dryrun+status smokes per build.
 - Language policy codified: public artifacts (UI strings, README, SECURITY)
   stay in English; internal development docs remain Spanish.
@@ -42,8 +76,7 @@ backup practices) plus complete CLI↔TUI parity.
 
 ## 1.1.0 — 2026-08-24
 
-Logic fixes and robustness round from a full project audit
-(P0+P1 of `dev/reportes/analisis-completo-v1.0.1.md`).
+Logic fixes and robustness round from a full project audit.
 
 ### Fixed (logic)
 - **fix(parser)**: keys placed before any `[section]` header are now rejected

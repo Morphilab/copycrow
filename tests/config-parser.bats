@@ -371,7 +371,7 @@ EOF
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Hardening v1.0.1 — host regex, retention whitelist, key whitelist, fail-fast
+# Input hardening — host regex, retention whitelist, key whitelist, fail-fast
 # ───────────────────────────────────────────────────────────────────────────────
 
 @test "host: rejects leading dash (SSH option injection)" {
@@ -643,7 +643,7 @@ CONF
     run config_migrate
     [ "$status" -eq 0 ]
 
-    # Post-migración la config debe cargar limpia (P0-2: antes quedaba inválida).
+    # After migration the config must load cleanly.
     # Bare call (not `run`): state must survive into this shell for config_get_var.
     config_load "$COPYCROW_CONF"
     [ "$?" -eq 0 ]
@@ -653,8 +653,8 @@ CONF
 }
 
 @test "config_load: strips UTF-8 BOM instead of failing with misleading error" {
-    # P1-7: editores de Windows añaden BOM; el parser lo trataba como basura
-    # y fallaba con "key appears before any section".
+    # Windows editors prepend a BOM; the parser used to treat it as junk
+    # and fail with "key appears before any section".
     local conf="/tmp/copycrow-bom-$$.conf"
     printf '\xef\xbb\xbf[job_bom]\ntype = manual\nsources = /home\nhost = server\nremote_path = /a\n' > "$conf"
     config_load "$conf"
@@ -664,8 +664,8 @@ CONF
 }
 
 @test "config_load: a section literally named __duplicate_ignored__ is a normal job" {
-    # P1-8: el centinela interno colisionaba con ese nombre de sección y
-    # descartaba TODAS sus claves → job zombi inservible.
+    # The internal duplicate sentinel must not collide with a section of
+    # this name: discarding ALL its keys would yield a useless zombie job.
     local conf="/tmp/copycrow-sent-$$.conf"
     cat > "$conf" << 'CONF'
 [__duplicate_ignored__]
@@ -681,8 +681,8 @@ CONF
 }
 
 @test "config_load: explicit empty mount_dir fails with clear message" {
-    # P2-9a: `mount_dir =` desaparecía en silencio y la extracción degradaba
-    # a la raíz del proyecto. Ahora debe rechazarse con mensaje claro.
+    # An empty `mount_dir =` must never silently degrade extraction to the
+    # project root: reject it with a clear message.
     local conf="/tmp/copycrow-empty-md-$$.conf"
     printf '[global]\nmount_dir =\n[job_e]\ntype = manual\nsources = /home\nhost = server\nremote_path = /a\n' > "$conf"
     local out="" rc=0
@@ -693,7 +693,7 @@ CONF
 }
 
 @test "config_load: explicit empty retention is accepted (falls back to global)" {
-    # Comportamiento legítimo que NO debe romperse al aceptar valores vacíos.
+    # Legitimate behavior that must NOT break when accepting empty values.
     local conf="/tmp/copycrow-empty-ret-$$.conf"
     printf '[global]\nretention_default = --keep-daily 7\n[job_r]\ntype = manual\nsources = /home\nhost = server\nremote_path = /a\nretention =\n' > "$conf"
     config_load "$conf"
@@ -703,7 +703,7 @@ CONF
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Roadmap v1.2.0 — nuevas claves globales + alias de schedule
+# Newer global keys + schedule alias
 # ───────────────────────────────────────────────────────────────────────────────
 
 @test "config_load: accepts logs_retention_days / verify_schedule / on_failure_cmd" {

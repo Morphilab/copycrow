@@ -9,7 +9,6 @@
 #                paths/flags as separate arguments.
 set -euo pipefail
 
-# Project root directory
 COPYCROW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -74,8 +73,7 @@ backup_safe_archive_name() {
 # ───────────────────────────────────────────────────────────────────────────────
 # _borg_interactive
 # True when borg can prompt the user safely (TTY attached AND no passphrase
-# variables exported). Single source of truth — this check used to be
-# duplicated in create/extract/prune.
+# variables exported). Single source of truth for create/extract/prune.
 # ───────────────────────────────────────────────────────────────────────────────
 _borg_interactive() {
     [[ -t 0 ]] && [[ -z "${BORG_PASSPHRASE:-}" && -z "${BORG_PASSCOMMAND:-}" ]]
@@ -94,7 +92,7 @@ _interactive_stdin_available() {
 # ───────────────────────────────────────────────────────────────────────────────
 # backup_init
 # Verifies borg is installed and creates required directories
-# ───────────────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────────
 backup_init() {
     if ! command -v borg &>/dev/null; then
         echo "ERROR: borg is not installed. Run: sudo apt install borgbackup" >&2
@@ -209,7 +207,6 @@ backup_build_repo_url() {
 # ───────────────────────────────────────────────────────────────────────────────
 # backup_get_repo_urls_for_host
 # Lists EVERY distinct repository URL configured for a host across all jobs.
-# (Fixes the first-match blind spot where only one repo per host was visible.)
 # Word-splitting of config_get_sections output is intentional.
 # ───────────────────────────────────────────────────────────────────────────────
 backup_get_repo_urls_for_host() {
@@ -488,8 +485,7 @@ backup_create() {
         echo "  Source:      $sources"
         echo "  Destination: $repo_url"
         echo "  Archive:     $name"
-        # Single Retention line always: job override, else the global default
-        # (B9: the old pair printed an empty line AND the default line).
+        # Single Retention line always: job override, else the global default.
         local job_retention
         job_retention="$(config_get_var "$section" "retention")"
         if [[ -n "$job_retention" ]]; then
@@ -645,7 +641,7 @@ backup_list() {
     done < <(backup_get_repo_urls_for_host "$host")
 
     # The same archive may exist in two repos of one host (re-targeted jobs):
-    # dedupe preserving order (C6).
+    # dedupe preserving order.
     if [[ -n "$all" ]]; then
         all="$(printf '%s' "$all" | awk '!seen[$0]++')"
     fi
@@ -685,7 +681,7 @@ backup_extract() {
     local host="$1"
     local archive="$2"
 
-    # C1 hardening: never build paths from unvalidated names.
+    # Never build paths from unvalidated names.
     if ! backup_safe_archive_name "$archive"; then
         echo "ERROR: Invalid archive name: '$archive'" >&2
         return 1
@@ -903,7 +899,7 @@ backup_open() {
     local host="$1"
     local archive="$2"
 
-    # C1 hardening: validated before any path or rm -rf usage.
+    # Validated before any path or rm -rf usage.
     if ! backup_safe_archive_name "$archive"; then
         echo "ERROR: Invalid archive name: '$archive'" >&2
         return 1

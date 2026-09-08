@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════════
 # copycrow — doctor.sh
-# One-shot health check: ✓/✗ report with actionable hints (roadmap P2-14).
+# One-shot health check: ✓/✗ report with actionable hints.
 # Exit: 0 healthy-or-warnings · 1 at least one FAILURE.
 # External tools (borg/ssh/systemctl/loginctl/df) invoked normally → tests can
 # stub them via PATH. Requires config-parser.sh (and backup-core.sh for
