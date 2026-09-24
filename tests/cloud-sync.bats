@@ -361,3 +361,48 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"could not persist manifest"* ]]
 }
+
+@test "cloud_sync_job: a file vanishing mid-walk is skipped; sync still completes" {
+    # Sorted walk: aaa-early uploads BEFORE zzz-late. The stub deletes zzz
+    # during aaa's upload, so zzz's stat() fails when the walk reaches it
+    # (TOCTOU). The sync must warn+skip, keep the manifest consistent and
+    # return 0 — not die mid-run under set -e.
+    echo early > "$FAKE_REPO/aaa-early.txt"
+    echo doomed > "$FAKE_REPO/zzz-late.txt"
+    cat > "${COPYCROW_TEST_SANDBOX}/bin/proton-drive" << 'STUB'
+#!/usr/bin/env bash
+sub="${1:-}"; shift || true
+case "$sub" in
+    filesystem)
+        cmd="${1:-}"; shift || true
+        case "$cmd" in
+            info)
+                p="${*: -1}"
+                if [[ -e "${PROTON_STATE:?}${p}" ]]; then exit 0; fi
+                exit 1
+                ;;
+            create-folder)
+                mkdir -p "${PROTON_STATE:?}${1}/${2}"
+                exit 0
+                ;;
+            upload)
+                if [[ "$1" == *"/aaa-early.txt" && -n "${VICTIM_FILE:-}" ]]; then
+                    rm -f -- "$VICTIM_FILE"
+                fi
+                exit 0
+                ;;
+        esac
+        ;;
+esac
+exit 0
+STUB
+    chmod +x "${COPYCROW_TEST_SANDBOX}/bin/proton-drive"
+    export VICTIM_FILE="${FAKE_REPO}/zzz-late.txt"
+
+    run cloud_sync_job cloud_job
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"vanished"* ]]
+    # aaa was uploaded and the manifest was still persisted.
+    grep -q "aaa-early.txt" "${XDG_CACHE_HOME}/copycrow/cloud/cloud_job.manifest"
+    ! grep -q "zzz-late.txt" "${XDG_CACHE_HOME}/copycrow/cloud/cloud_job.manifest"
+}

@@ -235,8 +235,10 @@ cloud_pending_count() {
         [[ "$rel" == lock* ]] && continue
         _cloud_relpath_unsafe "$rel" && continue
         seen="${_CLOUD_SEEN[$rel]:-}"
-        size="$(stat -c %s -- "$file")"
-        mtime="$(stat -c %Y -- "$file")"
+        # TOCTOU: the file may vanish between the find walk and this stat.
+        size="$(stat -c %s -- "$file" 2>/dev/null)" || size=""
+        mtime="$(stat -c %Y -- "$file" 2>/dev/null)" || mtime=""
+        [[ -z "$size" || -z "$mtime" ]] && continue
         if [[ -z "$seen" || "$seen" != "${size} ${mtime}" ]]; then
             count=$((count + 1))
         fi
@@ -295,8 +297,18 @@ cloud_sync_job() {
         fi
 
         seen="${_CLOUD_SEEN[$rel]:-}"
-        size="$(stat -c %s -- "$file")"
-        mtime="$(stat -c %Y -- "$file")"
+        # TOCTOU: the file may vanish between the find walk and this stat
+        # (e.g. concurrent compaction). Warn+skip keeps the run and the
+        # manifest consistent instead of dying mid-walk under set -e.
+        size="$(stat -c %s -- "$file" 2>/dev/null)" || size=""
+        mtime="$(stat -c %Y -- "$file" 2>/dev/null)" || mtime=""
+        if [[ -z "$size" || -z "$mtime" ]]; then
+            backup_log "WARN" "$section" "cloud_sync" "skipped" \
+                "file=${rel}" "reason=vanished_mid_walk"
+            echo "WARNING: [$section] file vanished mid-walk, skipping: ${rel}" >&2
+            skipped=$((skipped + 1))
+            continue
+        fi
 
         if [[ -n "$seen" && "$seen" == "${size} ${mtime}" ]]; then
             skipped=$((skipped + 1))
