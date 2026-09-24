@@ -29,7 +29,7 @@ Automated and manual backup system based on **Borg Backup** with a terminal inte
 - **Dry-run mode** — `./copycrow.sh dryrun <job>` simulates without writing
 - **Repository verification** — `verify <job>` / `verify-all` run `borg check`; optional `verify_schedule` timer detects silent corruption
 - **Failure notifications** — optional `[global] on_failure_cmd` hook fired when a backup or verification fails
-- **Health check** — `doctor` preflights borg (local/remote), SSH, passphrase strategy, linger, systemd session, disk space and directory permissions
+- **Health check** — `doctor` preflights borg (local/remote), SSH, passphrase strategy, linger, systemd session, disk space, directory permissions, and Proton Drive (binary, D-Bus wrapper, session) when cloud sync is configured
 - **Log retention** — `[global] logs_retention_days` auto-purges old JSON logs (default 30)
 - **Bash completion** — commands, job names and hosts (`completions/copycrow.bash`)
 
@@ -318,6 +318,7 @@ copycrow/
 ├── tests/                   ← bats-core tests
 │   ├── backup-core.bats
 │   ├── cli.bats
+│   ├── cloud-sync.bats
 │   ├── completions.bats
 │   ├── config-parser.bats
 │   ├── doctor.bats
