@@ -12,7 +12,9 @@ COPYCROW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [[ -z "${CONFIG_LOADED:-}" ]]; then
     source "${COPYCROW_ROOT}/src/config-parser.sh"
-    if [[ -f "${COPYCROW_ROOT}/copycrow.conf" ]]; then
+    # Honor the COPYCROW_CONF override (config-parser normalized it): the
+    # active conf may live anywhere, mirroring the CLI contract.
+    if [[ -f "${COPYCROW_CONF}" ]]; then
         if config_load; then
             CONFIG_LOADED="1"
         fi
@@ -24,10 +26,24 @@ fi
 # Main copycrow menu
 # ───────────────────────────────────────────────────────────────────────────────
 tui_main() {
-    if [[ ! -f "${COPYCROW_ROOT}/copycrow.conf" ]]; then
+    # Same config contract as the CLI: the active conf is $COPYCROW_CONF.
+    if [[ ! -f "${COPYCROW_CONF}" ]]; then
         whiptail --title "copycrow" --msgbox \
-            "copycrow.conf not found\n\nRun first: ./copycrow.sh init" 10 60
+            "Configuration not found: ${COPYCROW_CONF}\n\nRun first: ./copycrow.sh init" 10 60
         return 1
+    fi
+
+    # The conf may have appeared (or failed to parse) after this TUI started:
+    # (re)load when the source-time load did not run or did not succeed.
+    if [[ -z "${CONFIG_LOADED:-}" ]]; then
+        local load_out="" load_rc=0
+        load_out="$(config_load 2>&1)" || load_rc=$?
+        if (( load_rc != 0 )); then
+            whiptail --title "copycrow — Configuration errors" --scrolltext --msgbox \
+                "${load_out}\n\nFix the configuration and relaunch." 22 70
+            return 1
+        fi
+        CONFIG_LOADED="1"
     fi
 
     # Same validation contract as the CLI: refuse to operate on a broken conf.
@@ -45,6 +61,8 @@ tui_main() {
 
     while true; do
         local option
+        # Convention-compliant capture: ESC/cancel (rc != 0) must fall through
+        # to the "" case, not kill the whole TUI via errexit.
         option=$(whiptail --title "copycrow — Main Menu" \
             --menu "Select an option:" 22 70 12 \
             "1" "Create manual backup" \
@@ -60,7 +78,7 @@ tui_main() {
             "v" "Verify repository integrity" \
             "s" "Sync job to Proton Drive" \
             "0" "Exit" \
-            3>&1 1>&2 2>&3)
+            3>&1 1>&2 2>&3) || option=""
 
         case "$option" in
             # Handlers report failures through dialogs and may return nonzero;
@@ -78,7 +96,9 @@ tui_main() {
             v) tui_verify_repo || true ;;
             s) tui_sync_job || true ;;
             0|"")
-                clear
+                # Cosmetic only: a missing/usable-less TERM must not turn the
+                # clean exit into an errexit crash.
+                clear 2>/dev/null || true
                 break
                 ;;
         esac
@@ -132,7 +152,7 @@ tui_dryrun_backup() {
     selection=$(whiptail --title "Dry-Run Backup" \
         --menu "Select the job:" 15 60 8 \
         "${menu_args[@]}" \
-        3>&1 1>&2 2>&3)
+        3>&1 1>&2 2>&3) || selection=""
 
     if [[ -z "$selection" ]]; then
         return 0
@@ -173,14 +193,16 @@ tui_verify_repo() {
     selection=$(whiptail --title "Verify Repository" \
         --menu "Run borg check for:" 16 64 8 \
         "${menu_args[@]}" \
-        3>&1 1>&2 2>&3)
+        3>&1 1>&2 2>&3) || selection=""
 
     if [[ -z "$selection" ]]; then
         return 0
     fi
 
-    local tmp_out="${COPYCROW_ROOT}/.mnt/.tui-output"
-    mkdir -p "${COPYCROW_ROOT}/.mnt"
+    # Temp file under the CONFIGURED mount dir (never a hardcoded .mnt).
+    local tmp_root="${COPYCROW_ROOT}/$(config_get_global 'mount_dir')"
+    mkdir -p "$tmp_root"
+    local tmp_out="${tmp_root}/.tui-output"
 
     whiptail --title "Verifying..." --infobox "Running borg check for '$selection'..." 8 55
 
@@ -262,7 +284,7 @@ tui_create_backup() {
     selection=$(whiptail --title "Create Backup" \
         --menu "Select the job:" 15 60 8 \
         "${menu_args[@]}" \
-        3>&1 1>&2 2>&3)
+        3>&1 1>&2 2>&3) || selection=""
 
     if [[ -z "$selection" ]]; then
         return 0
@@ -271,7 +293,10 @@ tui_create_backup() {
     if whiptail --title "Confirm" --yesno \
         "Create backup for job '$selection'?" 8 50; then
 
-        local tmp_out="${COPYCROW_ROOT}/.mnt/.tui-output"
+        # Temp file under the CONFIGURED mount dir (never a hardcoded .mnt).
+        local tmp_root="${COPYCROW_ROOT}/$(config_get_global 'mount_dir')"
+        mkdir -p "$tmp_root"
+        local tmp_out="${tmp_root}/.tui-output"
 
         whiptail --title "Creating..." --infobox "Creating backup for job '$selection'..." 8 50
 
@@ -310,7 +335,7 @@ tui_list_backups() {
     host_sel=$(whiptail --title "List Backups" \
         --menu "Select host:" 12 50 6 \
         "${menu_args[@]}" \
-        3>&1 1>&2 2>&3)
+        3>&1 1>&2 2>&3) || host_sel=""
 
     if [[ -z "$host_sel" ]]; then
         return 0
@@ -352,7 +377,7 @@ tui_open_container() {
     host_sel=$(whiptail --title "Open Container" \
         --menu "Select host:" 12 50 6 \
         "${host_args[@]}" \
-        3>&1 1>&2 2>&3)
+        3>&1 1>&2 2>&3) || host_sel=""
 
     if [[ -z "$host_sel" ]]; then
         return 0
@@ -376,7 +401,7 @@ tui_open_container() {
     archive_sel=$(whiptail --title "Select Backup" \
         --menu "Choose a backup to open:" 18 60 10 \
         "${item_args[@]}" \
-        3>&1 1>&2 2>&3)
+        3>&1 1>&2 2>&3) || archive_sel=""
 
     if [[ -z "$archive_sel" ]]; then
         return 0
@@ -396,8 +421,9 @@ tui_open_container() {
 tui_view_status() {
     local status=""
 
-    if [[ ! -f "${COPYCROW_ROOT}/copycrow.conf" ]]; then
-        status+="copycrow.conf not found\nRun: ./copycrow.sh init\n"
+    if [[ ! -f "${COPYCROW_CONF}" ]]; then
+        status+="Configuration not found: ${COPYCROW_CONF}\n"
+        status+="Run: ./copycrow.sh init\n"
     else
         status+="Configuration: OK\n"
     fi
@@ -414,7 +440,6 @@ tui_view_status() {
         local host=$(config_get_var "$section" "host")
         status+="  [$section] $type → $host\n"
     done
-
     status+="\nActive timers:\n"
     local timers
     timers=$(systemctl --user list-timers 'copycrow-*' --no-pager 2>/dev/null | grep "copycrow-" || echo "")
@@ -496,7 +521,7 @@ tui_manage_timers() {
         "2" "Uninstall all timers" \
         "3" "View active timers" \
         "0" "Back" \
-        3>&1 1>&2 2>&3)
+        3>&1 1>&2 2>&3) || option=""
 
     case "$option" in
         1)

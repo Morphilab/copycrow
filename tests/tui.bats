@@ -64,9 +64,9 @@ remote_path = /tmp/repo
 schedule = daily
 EOF
 
-    # tui_main refuses to run without ${COPYCROW_ROOT}/copycrow.conf — a
-    # gitignored file that only exists on dev machines. Mirror the tree into
-    # the sandbox so the guard is satisfied on every environment.
+    # The TUI reads $COPYCROW_CONF (mirrors the CLI contract). This mirror of
+    # the same content at the legacy root path exercises the "both exist"
+    # case; the COPYCROW_CONF-only path is covered by its own test below.
     export COPYCROW_ROOT="${COPYCROW_TEST_SANDBOX}/projroot"
     mkdir -p "$COPYCROW_ROOT"
     ln -s "${real_root}/copycrow.sh" "${COPYCROW_ROOT}/copycrow.sh"
@@ -222,4 +222,70 @@ EOF
     local flow_out="" rc=0
     flow_out="$(FAKE_CHOICE=cloudy tui_sync_job >/dev/null 2>&1 && echo SURVIVED)" || rc=$?
     grep -q "Sync FAILED" "$TUI_LOG"
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Robustness: COPYCROW_CONF override, clean cancellation, temp path
+# ───────────────────────────────────────────────────────────────────────────────
+
+@test "tui_main: honors COPYCROW_CONF without a project-root copycrow.conf" {
+    rm -f "${COPYCROW_ROOT}/copycrow.conf"
+    local rc=0
+    FAKE_CHOICE="" tui_main > /dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 0 ]
+    grep -q -- "--menu" "$TUI_LOG"
+}
+
+@test "tui_view_status: reflects the COPYCROW_CONF job list (not the root conf)" {
+    rm -f "${COPYCROW_ROOT}/copycrow.conf"
+    FAKE_CHOICE="" tui_view_status >/dev/null 2>&1 || true
+    grep -q "timer_job" "$TUI_LOG"
+    ! grep -q "not found" "$TUI_LOG"
+}
+
+@test "tui_main: ESC/cancel on the main menu exits cleanly (rc 0, no crash)" {
+    # A whiptail that exits 1 on --menu simulates ESC/cancel with no output.
+    # `run` (not `... || rc=$?`): a || context DISABLES errexit inside the
+    # function and would mask the crash that production (top-level call)
+    # suffers. run executes in a subshell with errexit intact.
+    cat > "${COPYCROW_TEST_SANDBOX}/bin/whiptail" << 'STUB'
+#!/usr/bin/env bash
+case " $* " in
+    *" --menu "*) exit 1 ;;
+    *) exit 0 ;;
+esac
+STUB
+    chmod +x "${COPYCROW_TEST_SANDBOX}/bin/whiptail"
+    # A REAL subshell with set -e: production calls tui_main top-level under
+    # errexit, and both `run fn` and `... || rc` contexts suppress -e inside
+    # the function, masking the crash this test guards against.
+    run bash -c '
+        set -euo pipefail
+        source "'"${COPYCROW_ROOT}"'/src/tui.sh"
+        tui_main
+    '
+    [ "$status" -eq 0 ]
+}
+
+@test "tui_verify_repo: temp output lives under the configured mount_dir (no stray .mnt)" {
+    cat > "${COPYCROW_TEST_SANDBOX}/bin/borg" << 'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "${COPYCROW_TEST_SANDBOX}/bin/borg"
+    cat > "$COPYCROW_CONF" << 'EOF'
+[global]
+mount_dir = mnt-custom
+
+[timer_job]
+type = automatic
+sources = /home
+host = local
+remote_path = /tmp/repo
+schedule = daily
+EOF
+    config_load "$COPYCROW_CONF"
+    FAKE_CHOICE=timer_job tui_verify_repo >/dev/null 2>&1 || true
+    [ ! -e "${COPYCROW_ROOT}/.mnt" ]
+    [ -d "${COPYCROW_ROOT}/mnt-custom" ]
 }
