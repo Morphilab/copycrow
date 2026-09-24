@@ -484,3 +484,136 @@ EOF
     [ "$status" -ne 0 ]
     grep -q '^hookp_job|' "$HOOK_LOG"
 }
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Robustness: multi-repo lookup, cd/umask containment, non-destructive default
+# ───────────────────────────────────────────────────────────────────────────────
+
+@test "backup_find_repo_for_archive: finds the archive in a later repo after an earlier repo fails to list" {
+    _stub_borg 0
+    cat > "${PATH_STUB_DIR}/borg" << 'STUB'
+#!/usr/bin/env bash
+if [ "$1" = "list" ]; then
+    # argv: list --format <fmt> <url> — the URL is the 4th argument.
+    if [[ "$4" == *"/backups/r1" ]]; then
+        exit 3
+    fi
+    printf '%s\n' "auto-20260101-000000"
+    exit 0
+fi
+exit 0
+STUB
+    chmod +x "${PATH_STUB_DIR}/borg"
+
+    _load_conf << EOF
+[global]
+
+[r1]
+type = manual
+sources = /home
+host = multi
+remote_path = /backups/r1
+
+[r2]
+type = manual
+sources = /home
+host = multi
+remote_path = /backups/r2
+EOF
+
+    run backup_find_repo_for_archive "multi" "auto-20260101-000000"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ssh://multi//backups/r2"* ]]
+}
+
+# _extract_cwd runs inside the CURRENT shell in the captured branch (via
+# _run_capture), so it must subshell its cd/umask or they leak to the caller.
+# The module tree is mirrored into the sandbox so COPYCROW_ROOT (and hence
+# mount_dir) resolves there — never the real project tree.
+_make_extract_sandbox() {
+    local proj="${COPYCROW_TEST_SANDBOX}/proj"
+    mkdir -p "$proj"
+    ln -s "${COPYCROW_ROOT}/src" "${proj}/src"
+    cat > "${PATH_STUB_DIR}/borg" << 'STUB'
+#!/usr/bin/env bash
+case "$1" in
+    list) printf '%s\n' "auto-20260101-000000"; exit 0 ;;
+    extract) mkdir -p restored && echo data > restored/file.txt; exit 0 ;;
+    *) exit 0 ;;
+esac
+STUB
+    chmod +x "${PATH_STUB_DIR}/borg"
+    cat > "${PATH_STUB_DIR}/xdg-open" << 'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "${PATH_STUB_DIR}/xdg-open"
+    local conf="${COPYCROW_TEST_SANDBOX}/extract.conf"
+    cat > "$conf" << CONFEOF
+[global]
+mount_dir = .mnt
+logs_dir = ${COPYCROW_TEST_SANDBOX}/logs-sandbox
+
+[extract_job]
+type = manual
+sources = /home
+host = local
+remote_path = ${COPYCROW_TEST_SANDBOX}/repo
+CONFEOF
+    printf '%s\n' "$conf"
+}
+
+@test "backup_extract: cd/umask stay contained in the extraction (no leak to the caller)" {
+    _stub_borg 0
+    local conf
+    conf="$(_make_extract_sandbox)"
+
+    local script="${COPYCROW_TEST_SANDBOX}/leak-check.sh"
+    cat > "$script" << SCRIPTEOF
+#!/usr/bin/env bash
+set -euo pipefail
+export PATH="${PATH_STUB_DIR}:\$PATH"
+export COPYCROW_ROOT="${COPYCROW_TEST_SANDBOX}/proj"
+cd "\$COPYCROW_ROOT"
+umask_before=\$(umask)
+source "\${COPYCROW_ROOT}/src/config-parser.sh"
+source "\${COPYCROW_ROOT}/src/backup-core.sh"
+config_load "${conf}"
+backup_extract local auto-20260101-000000
+if [[ "\$PWD" == "\$COPYCROW_ROOT" ]]; then echo "PWD_OK=yes"; else echo "PWD_OK=no:\$PWD"; fi
+if [[ "\$(umask)" == "\$umask_before" ]]; then echo "UMASK_OK=yes"; else echo "UMASK_OK=no:\$(umask)"; fi
+SCRIPTEOF
+    chmod +x "$script"
+    run bash "$script"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"PWD_OK=yes"* ]]
+    [[ "$output" == *"UMASK_OK=yes"* ]]
+}
+
+@test "backup_open: pressing Enter on the delete prompt keeps the extraction" {
+    _stub_borg 0
+    local conf
+    conf="$(_make_extract_sandbox)"
+
+    local script="${COPYCROW_TEST_SANDBOX}/open-default.sh"
+    cat > "$script" << SCRIPTEOF
+#!/usr/bin/env bash
+set -euo pipefail
+export PATH="${PATH_STUB_DIR}:\$PATH"
+export COPYCROW_ROOT="${COPYCROW_TEST_SANDBOX}/proj"
+cd "\$COPYCROW_ROOT"
+source "\${COPYCROW_ROOT}/src/config-parser.sh"
+source "\${COPYCROW_ROOT}/src/backup-core.sh"
+config_load "${conf}"
+printf '\n\n' | backup_open local auto-20260101-000000
+if [[ -f "\$COPYCROW_ROOT/.mnt/auto-20260101-000000/restored/file.txt" ]]; then
+    echo "KEPT=yes"
+else
+    echo "KEPT=no"
+fi
+SCRIPTEOF
+    chmod +x "$script"
+    run bash "$script"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"KEPT=yes"* ]]
+}

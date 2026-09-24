@@ -242,6 +242,9 @@ backup_find_repo_for_archive() {
     while IFS= read -r url; do
         [[ -n "$url" ]] || continue
         listing=""
+        # Reset per iteration: a previous repo's failure must not veto the
+        # grep on this one (same convention as backup_list's lrc).
+        rc=0
         _run_capture listing borg list --format '{archive}{NL}' "$url" || rc=$?
         if (( rc == 0 )) && grep -qx -- "$archive" <<< "$listing"; then
             echo "$url"
@@ -725,12 +728,17 @@ backup_extract() {
     # group/others regardless of the caller's umask.
     _extract_cwd() {
         local dir="$1" spec="$2"
-        umask 077
-        cd -- "$dir" || return 1
-        # NOTE: no `exec` here — in the captured branch this function runs in
-        # the CURRENT shell and exec would replace the whole process, skipping
-        # the post-extract hardening below.
-        borg extract "$spec"
+        # Subshell: in the captured branch this function runs in the CURRENT
+        # shell (via _run_capture), so cd/umask would otherwise leak into the
+        # caller for the rest of the process.
+        (
+            umask 077
+            cd -- "$dir" || exit 1
+            # NOTE: no `exec` here — in the interactive branch the caller wraps
+            # this function in its own subshell for stream output, and exec
+            # would break that pairing for no gain.
+            borg extract "$spec"
+        )
     }
     if _borg_interactive; then
         ( _extract_cwd "$mnt_dir" "${repo_url}::${archive}" ) || exit_code=$?
@@ -938,7 +946,8 @@ backup_open() {
     read -r -p ""
 
     read -r -p "Delete extracted files? (y/n): " cleanup
-    if [[ "$cleanup" == "y" || "$cleanup" == "Y" || -z "$cleanup" ]]; then
+    # Destructive action: only an explicit y/Y deletes; Enter keeps the files.
+    if [[ "$cleanup" == "y" || "$cleanup" == "Y" ]]; then
         rm -rf "$mnt_dir"
         backup_log "INFO" "extraction" "cleanup" "ok" "archive=${archive}"
         echo "Files cleaned up."
