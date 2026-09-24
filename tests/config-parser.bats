@@ -974,3 +974,58 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"//"* ]]
 }
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Robustness: fail-fast on malformed lines, error count without modulo wrap
+# ───────────────────────────────────────────────────────────────────────────────
+
+@test "config_load: fails fast on a malformed line instead of silently ignoring it" {
+    # A mangled line (bad section header, stray text) used to be dropped in
+    # silence: keys after it landed in the previous section or vanished.
+    cat > /tmp/copycrow-test-badline.conf << 'EOF'
+[global]
+
+[my_job]
+type = automatic
+this line is not INI at all
+host = nas-backup
+EOF
+
+    run config_load /tmp/copycrow-test-badline.conf
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"malformed line"* ]]
+    [[ "$output" == *"this line is not INI at all"* ]]
+}
+
+@test "config_load: a mangled section header fails instead of stranding its keys" {
+    cat > /tmp/copycrow-test-badsection.conf << 'EOF'
+[global]
+
+[my job]
+type = automatic
+host = nas-backup
+EOF
+
+    run config_load /tmp/copycrow-test-badsection.conf
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"[my job]"* ]]
+}
+
+@test "config_validate: nonzero even when the error count wraps modulo 256" {
+    # 256 jobs each missing exactly one required field: `return $errors`
+    # wrapped 256 -> 0 and validation silently PASSED.
+    : > /tmp/copycrow-test-wrap.conf
+    printf '[global]\n\n' >> /tmp/copycrow-test-wrap.conf
+    local i
+    for ((i = 1; i <= 256; i++)); do
+        printf '[broken_%d]\ntype = manual\nsources = /home\nhost = local\n' "$i" >> /tmp/copycrow-test-wrap.conf
+    done
+
+    # Bare calls (NOT `run`): `run` executes in a subshell and would discard
+    # the loaded state, silently validating an empty config instead.
+    local lrc=0 vrc=0
+    config_load /tmp/copycrow-test-wrap.conf 2>/dev/null || lrc=$?
+    [ "$lrc" -eq 0 ]
+    config_validate 2>/dev/null || vrc=$?
+    [ "$vrc" -ne 0 ]
+}

@@ -155,6 +155,12 @@ config_load() {
                 # <section>:<key> collisions are structurally impossible.
                 CONFIG_JOBS["${current_section}:${key}"]="$value"
             fi
+        else
+            # Neither a [section] nor a key = value line: fail fast instead of
+            # dropping it in silence (a mangled section header would strand
+            # its keys in the previous section or lose them entirely).
+            echo "ERROR: [$file] malformed line (expected [section] or key = value): ${line}" >&2
+            return 1
         fi
     done < "$file"
 
@@ -504,7 +510,10 @@ config_validate() {
         fi
     done
 
-    return $errors
+    # Explicit boolean: `return $errors` would wrap modulo 256 (256 broken
+    # fields silently validated as success).
+    (( errors > 0 )) && return 1
+    return 0
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
