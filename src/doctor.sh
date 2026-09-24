@@ -36,7 +36,7 @@ _doctor_check_binaries() {
     if command -v whiptail >/dev/null 2>&1; then
         _doctor_pass "whiptail present"
     else
-        _doctor_warn "whiptail missing (TUI and migrate unavailable) — sudo apt install whiptail"
+        _doctor_warn "whiptail missing (TUI unavailable) — sudo apt install whiptail"
     fi
 }
 

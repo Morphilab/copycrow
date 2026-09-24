@@ -237,3 +237,47 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"Could not enable copycrow-verify"* ]]
 }
+
+@test "_timer_cleanup_orphans: daemon-reload after removing orphan units" {
+    # stop/disable alone leaves the removed timer loaded until some future
+    # daemon-reload; removal must conclude with one when something was removed.
+    local sdir="${XDG_CONFIG_HOME}/systemd/user"
+    mkdir -p "$sdir"
+    printf 'unit\n' > "$sdir/copycrow-ghost.timer"
+    printf 'unit\n' > "$sdir/copycrow-ghost.service"
+
+    mkdir -p "${COPYCROW_TEST_SANDBOX}/sysbin"
+    cat > "${COPYCROW_TEST_SANDBOX}/sysbin/systemctl" << 'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${SYSTEMCTL_LOG:?}"
+exit 0
+STUB
+    chmod +x "${COPYCROW_TEST_SANDBOX}/sysbin/systemctl"
+    export SYSTEMCTL_LOG="${COPYCROW_TEST_SANDBOX}/systemctl.log"
+    : > "$SYSTEMCTL_LOG"
+    export PATH="${COPYCROW_TEST_SANDBOX}/sysbin:${PATH}"
+
+    run _timer_cleanup_orphans ""
+    [ "$status" -eq 0 ]
+    grep -q "stop copycrow-ghost.timer" "$SYSTEMCTL_LOG"
+    [ ! -e "$sdir/copycrow-ghost.timer" ]
+    [ ! -e "$sdir/copycrow-ghost.service" ]
+    grep -q "daemon-reload" "$SYSTEMCTL_LOG"
+}
+
+@test "_timer_cleanup_orphans: no daemon-reload when nothing was removed" {
+    mkdir -p "${COPYCROW_TEST_SANDBOX}/sysbin2"
+    cat > "${COPYCROW_TEST_SANDBOX}/sysbin2/systemctl" << 'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${SYSTEMCTL_LOG2:?}"
+exit 0
+STUB
+    chmod +x "${COPYCROW_TEST_SANDBOX}/sysbin2/systemctl"
+    export SYSTEMCTL_LOG2="${COPYCROW_TEST_SANDBOX}/systemctl2.log"
+    : > "$SYSTEMCTL_LOG2"
+    export PATH="${COPYCROW_TEST_SANDBOX}/sysbin2:${PATH}"
+
+    run _timer_cleanup_orphans ""
+    [ "$status" -eq 0 ]
+    ! grep -q "daemon-reload" "$SYSTEMCTL_LOG2"
+}

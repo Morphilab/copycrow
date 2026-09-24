@@ -404,3 +404,37 @@ EOF
     run "${COPYCROW_ROOT}/copycrow.sh" help
     [[ "$output" == *"sync <job>"* ]]
 }
+
+@test "migrate: works with NO whiptail on PATH (config_migrate is pure sed)" {
+    # cmd_migrate used to gate on whiptail even though the migration never
+    # runs it: headless minimal systems could not migrate. Reproduce with a
+    # hermetic PATH holding only the tools the migrate path executes.
+    cat > "$COPYCROW_CONF" << 'EOF'
+[global]
+compresion = lz4
+
+[legacy_job]
+tipo = automatico
+origenes = /home
+host = local
+ruta_remota = /tmp/repo
+frecuencia = diario
+EOF
+
+    local mini_bin="${COPYCROW_TEST_SANDBOX}/mini-bin"
+    mkdir -p "$mini_bin"
+    local tool missing=0
+    for tool in env bash dirname mkdir cp basename mktemp sed grep diff rm mv; do
+        local src_path
+        src_path="$(command -v "$tool" 2>/dev/null)" || { missing=1; break; }
+        ln -s "$src_path" "${mini_bin}/${tool}"
+    done
+    [ "$missing" -eq 0 ] || skip "core tools unavailable"
+
+    run env PATH="$mini_bin" "${COPYCROW_ROOT}/copycrow.sh" migrate
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"migrated successfully"* ]]
+    grep -q "^type = automatic$" "$COPYCROW_CONF"
+    grep -q "^schedule = daily$" "$COPYCROW_CONF"
+    ! grep -q "^tipo =" "$COPYCROW_CONF"
+}

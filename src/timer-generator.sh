@@ -332,6 +332,7 @@ _timer_cleanup_orphans() {
     local timer_files=("${sdir}/${TIMER_PREFIX}-"*.timer)
     shopt -u nullglob
 
+    local removed=0
     local timer_file
     for timer_file in "${timer_files[@]}"; do
         [[ -f "$timer_file" ]] || continue
@@ -362,8 +363,15 @@ _timer_cleanup_orphans() {
             systemctl --user disable "${basename}.timer" 2>/dev/null || true
             rm -f "$timer_file"
             rm -f "${sdir}/${basename}.service"
+            removed=$((removed + 1))
         fi
     done
+
+    # Conclude removals with a reload: stop/disable alone leaves the deleted
+    # units loaded until some unrelated future daemon-reload.
+    if (( removed > 0 )); then
+        systemctl --user daemon-reload
+    fi
 }
 
 # ───────────────────────────────────────────────────────────────────────────────

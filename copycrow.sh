@@ -397,13 +397,10 @@ cmd_sync() {
 
 # ───────────────────────────────────────────────────────────────────────────────
 # migrate — Convert legacy configuration to English
+# NOTE: no whiptail requirement here — config_migrate is pure sed and must
+# work on headless minimal systems where the TUI is not installed.
 # ───────────────────────────────────────────────────────────────────────────────
 cmd_migrate() {
-    if ! command -v whiptail &>/dev/null; then
-        echo "ERROR: whiptail is not installed" >&2
-        return 1
-    fi
-
     config_migrate
 }
 
