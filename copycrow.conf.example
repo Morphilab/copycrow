@@ -57,9 +57,11 @@ logs_dir = logs
 # verify_schedule = monthly
 
 # Command executed when a backup or verification FAILS. Runs WITHOUT a shell:
-# no ; & | $ ` < > \ allowed. Context via env vars COPYCROW_FAILED_JOB,
+# no ; & | $ ` < > \ allowed, and the value is word-split on whitespace
+# (quotes are NOT interpreted — a single argument cannot contain spaces;
+# wrap anything richer in a script). Context via env vars COPYCROW_FAILED_JOB,
 # COPYCROW_FAILURE_ARCHIVE, COPYCROW_FAILURE_EXIT_CODE.
-# on_failure_cmd = notify-send "copycrow FAILED"
+# on_failure_cmd = notify-send copycrow-backup-failed
 
 # Proton Drive offsite replication: path of the proton-drive binary when it
 # is not on PATH (see README "Offsite backups to Proton Drive").

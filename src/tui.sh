@@ -203,6 +203,10 @@ tui_verify_repo() {
     local tmp_root="${COPYCROW_ROOT}/$(config_get_global 'mount_dir')"
     mkdir -p "$tmp_root"
     local tmp_out="${tmp_root}/.tui-output"
+    # Signal-safe cleanup: a kill mid-verify must not leave the temp behind.
+    if declare -F safety_add_temp >/dev/null 2>&1; then
+        safety_add_temp "$tmp_out"
+    fi
 
     whiptail --title "Verifying..." --infobox "Running borg check for '$selection'..." 8 55
 
@@ -297,6 +301,10 @@ tui_create_backup() {
         local tmp_root="${COPYCROW_ROOT}/$(config_get_global 'mount_dir')"
         mkdir -p "$tmp_root"
         local tmp_out="${tmp_root}/.tui-output"
+        # Signal-safe cleanup: a kill mid-backup must not leave the temp behind.
+        if declare -F safety_add_temp >/dev/null 2>&1; then
+            safety_add_temp "$tmp_out"
+        fi
 
         whiptail --title "Creating..." --infobox "Creating backup for job '$selection'..." 8 50
 

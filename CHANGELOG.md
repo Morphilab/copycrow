@@ -2,6 +2,48 @@
 
 All notable changes to copycrow are documented here.
 
+## Unreleased
+
+Reliability hardening for publication: two real concurrency/configuration
+bugs fixed with deterministic regression tests, a docs-truthfulness pass
+(README badge, `on_failure_cmd` semantics, `help --version`), and expanded
+test coverage (`init`, TUI temp cleanup).
+
+### Fixed
+- **fix(timers)**: re-installing timers from a shell without `BORG_PASSCOMMAND`
+  no longer strips `EnvironmentFile` from the generated units. The previously
+  persisted `~/.config/copycrow/borg.env` (deliberate, non-secret state) is
+  reused and referenced again, so automatic backups can no longer silently
+  lose their passphrase wiring while the env file sits unused on disk.
+- **fix(safety)**: closed the classic unlink race on job lock files. A process
+  that opened the lock file just before a holder released it (unlock + rm)
+  could flock the orphaned inode while the path was being recreated — two
+  simultaneous "holders" on one job. A post-flock inode recheck now detects
+  the swap and retries on the current file (bounded); when the check cannot
+  run (no `/proc`), locking fails open exactly as before.
+- **fix(parser)**: unrecognized config lines abort loading (fail-fast) instead
+  of being silently dropped; `config_validate` returns an explicit boolean —
+  an error count of 256 used to wrap modulo 256 into apparent success.
+- **fix(core)**: multi-repo archive lookup no longer leaks a stale exit code;
+  extraction runs in a subshell (no `cd`/`umask` leak into the caller); the
+  delete prompt of `open` requires an explicit `y` (Enter keeps the files).
+- **fix(tui)**: `COPYCROW_CONF` is honored in every guard, load and status
+  view; ESC/cancel can no longer kill the menu loop under `errexit`; temp
+  output lives under the configured mount dir and is registered for
+  signal-safe cleanup.
+- **fix(cloud-sync)**: files that vanish mid-walk (concurrent compaction) are
+  skipped with a warning instead of killing the sync; the manifest stays
+  consistent and the next run retries.
+- **fix(ops)**: `migrate` runs on headless minimal systems (no whiptail
+  requirement); orphan-timer cleanup concludes with `daemon-reload`.
+- **docs**: README test badge and `on_failure_cmd` examples corrected (the
+  hook runs without a shell — quotes are NOT interpreted, word-split only);
+  `help` now documents `--version`.
+
+### Changed
+- Hermetic test fixtures for CI parity (doctor borg stub, timer XDG pin, TUI
+  sandbox root); `init` now covered by tests in a sandboxed root.
+
 ## 1.3.0 — 2026-09-04
 
 Offsite replication to Proton Drive, plus a documentation and comment

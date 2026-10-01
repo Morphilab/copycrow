@@ -56,6 +56,7 @@ Commands:
   status            Show timer status and last backups
   doctor            Run a system health check
   help              Show this help
+  --version         Print version
 
 Examples:
   ./copycrow.sh                       # Open TUI menu

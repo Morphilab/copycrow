@@ -405,6 +405,49 @@ EOF
     [[ "$output" == *"sync <job>"* ]]
 }
 
+@test "help documents --version" {
+    run "${COPYCROW_ROOT}/copycrow.sh" help
+    [[ "$output" == *"--version"* ]]
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# init — exercised in a SANDBOXED root (symlinked entry point + src): cmd_init
+# writes into its own COPYCROW_ROOT, so the real project is never touched.
+# ───────────────────────────────────────────────────────────────────────────────
+
+_init_sandbox_root() {
+    local sandbox="${COPYCROW_TEST_SANDBOX}/$1"
+    mkdir -p "$sandbox"
+    ln -s "${COPYCROW_ROOT}/copycrow.sh" "$sandbox/copycrow.sh"
+    ln -s "${COPYCROW_ROOT}/src" "$sandbox/src"
+    printf '%s\n' "$sandbox"
+}
+
+@test "init: creates conf from example and runtime dirs in a fresh root" {
+    local sandbox
+    sandbox="$(_init_sandbox_root initroot)"
+
+    run "$sandbox/copycrow.sh" init
+    [ "$status" -eq 0 ]
+    [ -f "$sandbox/copycrow.conf" ]
+    [ -f "$sandbox/copycrow.conf.example" ]
+    [ -d "$sandbox/.mnt" ]
+    [ -d "$sandbox/logs" ]
+    [[ "$output" == *"Created: copycrow.conf"* ]]
+    [[ "$output" == *"Next steps"* ]]
+}
+
+@test "init: never clobbers an existing configuration" {
+    local sandbox
+    sandbox="$(_init_sandbox_root initroot2)"
+    printf '[global]\n\n[my_precious_job]\n' > "$sandbox/copycrow.conf"
+
+    run "$sandbox/copycrow.sh" init
+    [ "$status" -eq 0 ]
+    grep -q "my_precious_job" "$sandbox/copycrow.conf"
+    [[ "$output" == *"Already exists"* ]]
+}
+
 @test "migrate: works with NO whiptail on PATH (config_migrate is pure sed)" {
     # cmd_migrate used to gate on whiptail even though the migration never
     # runs it: headless minimal systems could not migrate. Reproduce with a

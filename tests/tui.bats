@@ -289,3 +289,29 @@ EOF
     [ ! -e "${COPYCROW_ROOT}/.mnt" ]
     [ -d "${COPYCROW_ROOT}/mnt-custom" ]
 }
+
+@test "tui_verify_repo: registers the temp output for signal-safe cleanup" {
+    cat > "${COPYCROW_TEST_SANDBOX}/bin/borg" << 'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "${COPYCROW_TEST_SANDBOX}/bin/borg"
+    cat > "$COPYCROW_CONF" << 'EOF'
+[global]
+mount_dir = mnt-custom
+
+[timer_job]
+type = automatic
+sources = /home
+host = local
+remote_path = /tmp/repo
+schedule = daily
+EOF
+    config_load "$COPYCROW_CONF"
+    source "${COPYCROW_ROOT}/src/safety.sh"
+    FAKE_CHOICE=timer_job tui_verify_repo >/dev/null 2>&1 || true
+
+    local expected="${COPYCROW_ROOT}/mnt-custom/.tui-output"
+    [[ " ${TEMP_FILES[*]:-} " == *" ${expected} "* ]]
+    [ ! -e "$expected" ]
+}

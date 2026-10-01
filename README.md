@@ -3,7 +3,7 @@
 [![Version](https://img.shields.io/badge/version-1.3.0-blue.svg)](https://github.com/morphilab/copycrow)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Bash](https://img.shields.io/badge/bash-4%2B-orange.svg)](https://www.gnu.org/software/bash/)
-[![Tests](https://img.shields.io/badge/tests-196%2F196%20passing-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-219%2F219%20passing-brightgreen.svg)](tests/)
 [![ShellCheck](https://img.shields.io/badge/shellcheck-0%20issues-brightgreen.svg)](.shellcheckrc)
 
 Automated and manual backup system based on **Borg Backup** with a terminal interface (TUI) and native **systemd** timers.
@@ -211,10 +211,15 @@ Add `verify_schedule = monthly` to `[global]` and run `install` to get a
 **Get notified when a backup fails:**
 ```ini
 [global]
-on_failure_cmd = notify-send "copycrow FAILED"
+on_failure_cmd = notify-send copycrow-backup-failed
 ```
-The hook runs WITHOUT a shell (charset-validated at load; no injection surface)
-and receives context via environment variables:
+The hook value is **word-split on whitespace and executed directly — no shell**:
+quotes are NOT interpreted, so a single argument cannot contain spaces.
+For anything richer, point it at a script:
+```ini
+on_failure_cmd = /usr/local/bin/copycrow-on-failure
+```
+The hook receives context via environment variables:
 `COPYCROW_FAILED_JOB`, `COPYCROW_FAILURE_ARCHIVE`, `COPYCROW_FAILURE_EXIT_CODE`.
 A failing hook is logged but never alters the backup's own result.
 
