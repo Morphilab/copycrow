@@ -99,6 +99,14 @@ timer_generate() {
         } > "$env_file"
         chmod 600 "$env_file"
         env_line="EnvironmentFile=${env_file}"
+    elif [[ -f "$env_file" ]]; then
+        # The env file is durable, deliberate state from a previous install.
+        # A re-install from a shell that lost the export (cron, new terminal)
+        # must keep the unit wired to it: regenerating without EnvironmentFile
+        # would silently downgrade every timer to passphrase-less failures.
+        env_line="EnvironmentFile=${env_file}"
+        echo "  ℹ  BORG_PASSCOMMAND not set in this shell; reusing existing ${env_file}"
+        echo "     (delete it or run uninstall to start over)"
     fi
 
     # If the config lives outside the default location, bake its path into
@@ -145,7 +153,9 @@ EOF
     echo "Generated: ${timer_name}.service + ${timer_name}.timer"
     echo "  OnCalendar: ${on_calendar}"
 
-    if [[ -z "${BORG_PASSPHRASE:-}" && -z "${BORG_PASSCOMMAND:-}" ]]; then
+    # Only when no wiring exists at all: with the env file reused above the
+    # "automatic backups will fail" warning would be a lie.
+    if [[ -z "$env_line" && -z "${BORG_PASSPHRASE:-}" ]]; then
         echo "  ⚠  WARNING: Neither BORG_PASSPHRASE nor BORG_PASSCOMMAND is set."
         echo "     Automatic backups will fail."
         echo ""

@@ -79,6 +79,28 @@ teardown() {
         "$HOME/.config/systemd/user/copycrow-timer_job.service"
 }
 
+@test "timer_generate: reinstall without BORG_PASSCOMMAND reuses the existing env file" {
+    # First install wires the passphrase mechanism in.
+    export BORG_PASSCOMMAND="pass show copycrow/borg"
+    timer_generate "timer_job" >/dev/null
+    local env_file="$HOME/.config/copycrow/borg.env"
+    cp "$env_file" "${env_file}.golden"
+
+    # Re-install from a shell that lost the export (cron, new terminal):
+    # the persisted env file is deliberate state and must stay referenced,
+    # otherwise the regenerated unit silently loses the passphrase wiring
+    # while the env file keeps sitting on disk unused.
+    unset BORG_PASSCOMMAND
+    run timer_generate "timer_job"
+    [ "$status" -eq 0 ]
+    grep -qF "EnvironmentFile=${env_file}" \
+        "$HOME/.config/systemd/user/copycrow-timer_job.service"
+    cmp -s "$env_file" "${env_file}.golden"
+    [[ "$output" == *"reusing"* ]]
+    # The wiring exists, so the "automatic backups will fail" warning is a lie.
+    ! grep -q "Automatic backups will fail" <<< "$output"
+}
+
 @test "timer_generate: honors timeout_start_sec=infinity" {
     _load_timer_conf << EOF
 [global]

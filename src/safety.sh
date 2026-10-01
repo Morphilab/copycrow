@@ -56,12 +56,31 @@ safety_add_temp() {
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
+# _lock_inode_matches
+# True when the open fd still refers to the file currently at <path>.
+# Guards the classic unlink race: a releaser unlinks the path AFTER
+# unlocking, so an acquirer that opened the old inode before that and only
+# flocked after it would hold an ORPHANED file while the path gets recreated
+# for the next acquirer — two simultaneous holders on one job.
+# If the fd itself cannot be resolved (no /proc), fail OPEN: the check is a
+# hardening extra, not a prerequisite for locking. A vanished path IS a
+# mismatch: the acquire retry recreates and relocks it.
+# ───────────────────────────────────────────────────────────────────────────────
+_lock_inode_matches() {
+    local path="$1" fd="$2" fd_ino path_ino
+    fd_ino="$(stat -Lc %i "/proc/self/fd/${fd}" 2>/dev/null)" || return 0
+    path_ino="$(stat -c %i -- "$path" 2>/dev/null)" || return 1
+    [[ "$fd_ino" == "$path_ino" ]]
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
 # safety_lock_acquire
 # Acquires an exclusive lock for a job (non-blocking) via flock(1).
 # The lock lives as long as the file descriptor is open, so the KERNEL
 # releases it when the holder dies — there are no stale locks to recover and
-# no check-then-act window: flock is atomic. The PID written inside the file
-# is diagnostic only.
+# no check-then-act window on the flock itself: flock is atomic. The one gap
+# flock cannot cover is the unlink-after-release of the lock FILE; the
+# post-flock inode recheck below closes it (see _lock_inode_matches).
 # Returns 0 if acquired, 1 if already locked.
 # Requires: flock (util-linux, present on all supported Debian/Ubuntu targets).
 # ───────────────────────────────────────────────────────────────────────────────
@@ -78,14 +97,31 @@ safety_lock_acquire() {
         return 1
     fi
 
-    : >> "$lock_file" 2>/dev/null || return 1
-    exec {COPYCROW_LOCK_FD}>> "$lock_file" || return 1
+    local attempt
+    for attempt in 1 2 3; do
+        : >> "$lock_file" 2>/dev/null || return 1
+        exec {COPYCROW_LOCK_FD}>> "$lock_file" || return 1
 
-    if ! flock -n "${COPYCROW_LOCK_FD}" 2>/dev/null; then
+        if ! flock -n "${COPYCROW_LOCK_FD}" 2>/dev/null; then
+            exec {COPYCROW_LOCK_FD}>&-
+            unset COPYCROW_LOCK_FD
+            return 1
+        fi
+
+        if _lock_inode_matches "$lock_file" "${COPYCROW_LOCK_FD}"; then
+            break
+        fi
+
+        # Our exclusive lock protects a replaced (orphaned) inode: drop it
+        # and retry on whatever the path holds now. Bounded: if the file
+        # keeps changing, refuse rather than risk a duplicate run.
         exec {COPYCROW_LOCK_FD}>&-
         unset COPYCROW_LOCK_FD
-        return 1
-    fi
+        if [[ "$attempt" == 3 ]]; then
+            echo "ERROR: lock file '$lock_file' kept changing during acquire; refusing a possible duplicate run." >&2
+            return 1
+        fi
+    done
 
     # Diagnostic only — never used for liveness decisions.
     printf '%s\n' "$$" > "$lock_file"
