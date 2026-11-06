@@ -49,6 +49,24 @@ teardown() {
     ! grep -qx "global" <<< "$output"
 }
 
+@test "_copycrow_jobs: defaults to COPYCROW_ROOT/copycrow.conf outside the project" {
+    local completion="${COPYCROW_ROOT}/completions/copycrow.bash"
+    local project="${COPYCROW_TEST_SANDBOX}/project"
+    mkdir -p "$project/cwd"
+    cp "$COPYCROW_CONF" "$project/copycrow.conf"
+
+    run bash -c '
+        unset COPYCROW_CONF
+        export COPYCROW_ROOT="$1"
+        cd "$1/cwd"
+        source "$2"
+        _copycrow_jobs
+    ' _ "$project" "$completion"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"daily_job"* ]]
+    [[ "$output" == *"weekly_job"* ]]
+}
+
 @test "_copycrow_hosts: distinct hosts only" {
     run _copycrow_hosts
     # nas (x2) + other → dedup leaves 2

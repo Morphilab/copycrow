@@ -38,10 +38,57 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
+@test "safety_lock_acquire: busy is rc 1, an unusable lock target is rc 2" {
+    # Callers must be able to tell "someone else holds the job" (skip, no
+    # failure) from "locking is impossible here" (a real error): conflating
+    # them lets verify-all report success while verifying nothing.
+    safety_lock_acquire "test_job" || true
+    run safety_lock_acquire "test_job"
+    [ "$status" -eq 1 ]
+    safety_lock_release
+
+    local not_a_dir="/tmp/copycrow-not-a-dir-$$"
+    : > "$not_a_dir"
+    export LOCK_DIR="$not_a_dir"
+    run safety_lock_acquire "test_job"
+    rm -f "$not_a_dir"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"lock"* ]]
+}
+
+@test "safety_lock_run: an unusable lock dir is not reported as 'already in progress'" {
+    local not_a_dir="/tmp/copycrow-not-a-dir-run-$$"
+    : > "$not_a_dir"
+    export LOCK_DIR="$not_a_dir"
+
+    run safety_lock_run "test_job" bash -c 'echo SHOULD-NOT-RUN'
+    rm -f "$not_a_dir"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"already in progress"* ]]
+    [[ "$output" != *"SHOULD-NOT-RUN"* ]]
+}
+
 @test "safety_lock_release: removes the lock" {
     safety_lock_acquire "test_job" || true
     safety_lock_release
     [ ! -f "${LOCK_DIR}/copycrow-test_job.lock" ]
+}
+
+@test "safety_lock_release: keeps the process stderr alive afterwards" {
+    # `exec {fd}>&- 2>/dev/null` (exec with NO command) persists the
+    # redirection for the whole shell, silently swallowing every later error
+    # message. Release must close the fd without that side effect.
+    run bash -c '
+        set -euo pipefail
+        source "'"$COPYCROW_ROOT"'/src/safety.sh"
+        LOCK_DIR="'"$LOCK_DIR"'"
+        safety_lock_acquire stderr_job
+        safety_lock_release
+        echo "STDERR-ALIVE" >&2
+    '
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"STDERR-ALIVE"* ]]
 }
 
 @test "safety_lock_run: executes under lock" {
@@ -134,6 +181,31 @@ fi
 exec "\${REAL_FLOCK}" "\$@"
 SHIM
     chmod +x "$shim_dir/flock"
+}
+
+# Deterministic reproduction of the release-ORDER residue: with the lock file
+# removed only AFTER the unlock, a releaser parked between unlock and rm lets
+# a racer flock the about-to-be-orphaned inode and pass its inode recheck
+# (the path still resolves to it); a later acquirer then recreates the path
+# and both "hold" the job. The rm shim freezes the releaser INSIDE the
+# removal, so the interleaving is exact, not probabilistic.
+_setup_rm_shim() {
+    local shim_dir="$1"
+    local lock_file="$2"
+    mkdir -p "$shim_dir"
+    cat > "$shim_dir/rm" << SHIM
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "-f" && "\${2:-}" == "${lock_file}" && ! -e "\${SHIM_DIR}/rm-intercepted" ]]; then
+    : > "\${SHIM_DIR}/rm-intercepted"
+    local_i=0
+    while [[ ! -e "\${SHIM_DIR}/rm-go" ]] && (( local_i < 400 )); do
+        sleep 0.05
+        local_i=\$((local_i + 1))
+    done
+fi
+exec "\${REAL_RM}" "\$@"
+SHIM
+    chmod +x "$shim_dir/rm"
 }
 
 _wait_for_marker() {
@@ -229,6 +301,98 @@ _wait_for_marker() {
     echo "b_rc=$b_rc c_rc=$c_rc"
     [ "$b_rc" -eq 0 ]   # the race precondition: B believes it holds the job
     [ "$c_rc" -ne 0 ]   # the invariant: C must be rejected while B lives and holds
+}
+
+@test "safety_lock_release: late acquirers never overlap on a releasing job" {
+    local dir="/tmp/copycrow-rm-order-$$"
+    rm -rf "$dir"
+    mkdir -p "$dir/locks" "$dir/shim"
+    export LOCK_DIR="$dir/locks"
+    local lock_file="${LOCK_DIR}/copycrow-race_job.lock"
+
+    # REAL_RM resolved before the shim shadows PATH.
+    local real_rm
+    real_rm="$(command -v rm)"
+    export REAL_RM="$real_rm" SHIM_DIR="$dir/shim"
+    _setup_rm_shim "$dir/shim" "$lock_file"
+
+    # Holder A: takes the lock, then releases THROUGH the shim, which parks
+    # it inside the rm call of the release.
+    (
+        bash -c '
+            export PATH="'"$dir"'/shim:$PATH"
+            source "'"$COPYCROW_ROOT"'/src/safety.sh"
+            LOCK_DIR="'"$LOCK_DIR"'"
+            safety_lock_acquire race_job
+            : > "'"$dir"'/a-held"
+            until [[ -e "'"$dir"'/a-stop" ]]; do :; done
+            safety_lock_release
+            : > "'"$dir"'/a-released"
+        '
+    ) &
+    local pid_a=$!
+    _wait_for_marker "$dir/a-held"
+
+    : > "$dir/a-stop"
+    _wait_for_marker "$dir/shim/rm-intercepted"
+
+    # Racer B: retries until it acquires. On the buggy order its FIRST attempt
+    # already succeeds (A unlocked before its parked rm) and B is left holding
+    # the inode A is about to unlink.
+    (
+        bash -c '
+            source "'"$COPYCROW_ROOT"'/src/safety.sh"
+            LOCK_DIR="'"$LOCK_DIR"'"
+            brc=1
+            for i in {1..600}; do
+                safety_lock_acquire race_job >/dev/null 2>&1 && brc=0
+                if [[ "$i" == "1" ]]; then : > "'"$dir"'/b-attempt1-done"; fi
+                [[ "$brc" == "0" ]] && break
+                sleep 0.02
+            done
+            echo "$brc" > "'"$dir"'/b-rc"
+            if [[ "$brc" == "0" ]]; then
+                : > "'"$dir"'/b-holding"
+                j=0
+                until [[ -e "'"$dir"'/c-done" ]] || (( ++j >= 400 )); do sleep 0.05; done
+            fi
+        '
+    ) &
+    local pid_b=$!
+    _wait_for_marker "$dir/b-attempt1-done"
+
+    # Let the removal finish. With the correct order this is also what
+    # unlocks A, so B can only acquire afterwards, on a fresh inode.
+    # C must not run before the removal has actually executed: otherwise it
+    # could flock B's still-current inode and fail for the wrong reason.
+    : > "$dir/shim/rm-go"
+    _wait_for_marker "$dir/a-released"
+    _wait_for_marker "$dir/b-holding"
+
+    # C: while B holds, a plain acquirer must be rejected.
+    (
+        bash -c '
+            source "'"$COPYCROW_ROOT"'/src/safety.sh"
+            LOCK_DIR="'"$LOCK_DIR"'"
+            crc=0
+            safety_lock_acquire race_job >/dev/null 2>&1 || crc=$?
+            echo "$crc" > "'"$dir"'/c-rc"
+        '
+    ) &
+    local pid_c=$!
+    wait "$pid_c"
+    : > "$dir/c-done"
+    wait "$pid_b"
+    wait "$pid_a"
+
+    local b_rc c_rc
+    b_rc="$(cat "$dir/b-rc")"
+    c_rc="$(cat "$dir/c-rc")"
+    rm -rf "$dir"
+
+    echo "b_rc=$b_rc c_rc=$c_rc"
+    [ "$b_rc" -eq 0 ]   # B acquires once A has released
+    [ "$c_rc" -ne 0 ]   # the invariant: C must be rejected while B holds
 }
 
 @test "_lock_inode_matches: matches fd and path on the same inode" {

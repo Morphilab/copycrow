@@ -9,12 +9,13 @@ setup() {
     export COPYCROW_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
     export COPYCROW_TEST_SANDBOX="$(mktemp -d /tmp/copycrow-cli-XXXXXX)"
     export COPYCROW_CONF="${COPYCROW_TEST_SANDBOX}/test.conf"
-    cat > "$COPYCROW_CONF" << 'EOF'
+    cat > "$COPYCROW_CONF" << EOF
 [global]
 retention_default = --keep-daily 7
 compression = lz4
 manual_prefix = manual-
 auto_prefix = auto-
+logs_dir = ${COPYCROW_TEST_SANDBOX}/logs
 
 [dry_job]
 type = manual
@@ -26,6 +27,7 @@ EOF
 
 teardown() {
     rm -rf "$COPYCROW_TEST_SANDBOX"
+    rm -f "${COPYCROW_ROOT}/.locks/copycrow-busy.lock"
 }
 
 @test "help: exits 0 and shows usage" {
@@ -56,6 +58,21 @@ EOF
     run "${COPYCROW_ROOT}/copycrow.sh" dryrun job_x
     [ "$status" -ne 0 ]
     [[ "$output" == *"compression"* ]]
+}
+
+@test "backup: a source token starting with '-' is refused before borg runs" {
+    cat > "$COPYCROW_CONF" << 'EOF'
+[global]
+
+[job_x]
+type = manual
+sources = --dry-run /home
+host = local
+remote_path = /tmp/r
+EOF
+    run "${COPYCROW_ROOT}/copycrow.sh" backup job_x
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"must not start with"* ]]
 }
 
 @test "dryrun: fails fast when required fields are missing" {
@@ -157,8 +174,9 @@ EOF
 }
 
 _verify_conf_fixture() {
-    cat > "$COPYCROW_CONF" << 'EOF'
+    cat > "$COPYCROW_CONF" << EOF
 [global]
+logs_dir = ${COPYCROW_TEST_SANDBOX}/logs
 
 [v1]
 type = manual
@@ -199,8 +217,9 @@ EOF
 
 @test "verify-all: verifies every job; aggregates failures" {
     _make_borg_recorder 0
-    cat > "$COPYCROW_CONF" << 'EOF'
+    cat > "$COPYCROW_CONF" << EOF
 [global]
+logs_dir = ${COPYCROW_TEST_SANDBOX}/logs
 
 [v1]
 type = manual
@@ -223,6 +242,121 @@ EOF
     run "${COPYCROW_ROOT}/copycrow.sh" verify-all
     [ "$status" -ne 0 ]
     [[ "$output" == *"failed verification"* ]]
+}
+
+@test "verify-all: a busy job is skipped (WARN), never counted as a failure" {
+    _make_borg_recorder 0
+    cat > "$COPYCROW_CONF" << EOF
+[global]
+logs_dir = ${COPYCROW_TEST_SANDBOX}/logs
+
+[busy]
+type = manual
+sources = /home
+host = local
+remote_path = /tmp/rb
+
+[idle]
+type = manual
+sources = /home
+host = local
+remote_path = /tmp/ri
+EOF
+
+    # A running backup holds the job lock (same lock dir the CLI uses).
+    local lock_dir="${COPYCROW_ROOT}/.locks"
+    mkdir -p "$lock_dir"
+    exec 9>"${lock_dir}/copycrow-busy.lock"
+    flock -n 9
+
+    run "${COPYCROW_ROOT}/copycrow.sh" verify-all
+
+    exec 9>&-
+    rm -f "${lock_dir}/copycrow-busy.lock"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"skipping verification"* ]]
+    [[ "$output" != *"failed verification"* ]]
+    ! grep -q '/tmp/rb' "$BORG_ARGS_LOG"
+    grep -q '/tmp/ri' "$BORG_ARGS_LOG"
+}
+
+@test "verify-all: skips are still reported when another job fails" {
+    mkdir -p "${COPYCROW_TEST_SANDBOX}/bin"
+    cat > "${COPYCROW_TEST_SANDBOX}/bin/borg" << 'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${BORG_ARGS_LOG:?}"
+case "$*" in
+    *"/tmp/rc_bad"*) exit 3 ;;
+esac
+exit 0
+STUB
+    chmod +x "${COPYCROW_TEST_SANDBOX}/bin/borg"
+    export PATH="${COPYCROW_TEST_SANDBOX}/bin:${PATH}"
+    export BORG_ARGS_LOG="${COPYCROW_TEST_SANDBOX}/borg-args.log"
+    : > "$BORG_ARGS_LOG"
+
+    cat > "$COPYCROW_CONF" << EOF
+[global]
+logs_dir = ${COPYCROW_TEST_SANDBOX}/logs
+
+[busy]
+type = manual
+sources = /home
+host = local
+remote_path = /tmp/rc_busy
+
+[broken]
+type = manual
+sources = /home
+host = local
+remote_path = /tmp/rc_bad
+EOF
+
+    local lock_dir="${COPYCROW_ROOT}/.locks"
+    mkdir -p "$lock_dir"
+    exec 9>"${lock_dir}/copycrow-busy.lock"
+    flock -n 9
+
+    run "${COPYCROW_ROOT}/copycrow.sh" verify-all
+
+    exec 9>&-
+    rm -f "${lock_dir}/copycrow-busy.lock"
+
+    # A failure must not swallow the skip report: the operator needs both.
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"skipping verification"* ]]
+    [[ "$output" == *"failed verification"* ]]
+}
+
+@test "verify-all: an unusable lock dir fails loudly instead of reporting success" {
+    # Locking impossible (not "someone else holds it") must never look like a
+    # skip: a silent "all busy, rc 0" makes the integrity timer report success
+    # forever while verifying nothing.
+    local proj="${COPYCROW_TEST_SANDBOX}/proj"
+    mkdir -p "$proj"
+    cp -r "${COPYCROW_ROOT}/src" "$proj/"
+    cp "${COPYCROW_ROOT}/copycrow.sh" "$proj/"
+    # `.locks` as a regular file: no lock file can be created under it.
+    : > "${proj}/.locks"
+
+    _make_borg_recorder 0
+    cat > "$COPYCROW_CONF" << EOF
+[global]
+logs_dir = ${COPYCROW_TEST_SANDBOX}/logs
+
+[v1]
+type = manual
+sources = /home
+host = local
+remote_path = /tmp/rl
+EOF
+
+    run "${proj}/copycrow.sh" verify-all
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"failed verification"* ]]
+    [[ "$output" != *"skipping verification"* ]]
+    ! grep -q '/tmp/rl' "$BORG_ARGS_LOG"
 }
 
 # ───────────────────────────────────────────────────────────────────────────────

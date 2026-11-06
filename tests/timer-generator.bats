@@ -185,6 +185,127 @@ EOF
     grep -qF 'Environment="COPYCROW_CONF=' "$unit"
 }
 
+@test "timer_generate: %-escapes the conf path and keeps WorkingDirectory bare" {
+    # systemd expands %-specifiers in Environment= (and in the path settings):
+    # a literal % in a path must be written %% or the unit is rejected /
+    # resolves to the wrong path. WorkingDirectory= takes a BARE path —
+    # double quotes are not part of its syntax (quoted => "not absolute").
+    export COPYCROW_CONF="${COPYCROW_TEST_SANDBOX}/100% job.conf"
+    : > "$COPYCROW_CONF"
+    run timer_generate "timer_job"
+    [ "$status" -eq 0 ]
+
+    local unit="$HOME/.config/systemd/user/copycrow-timer_job.service"
+    grep -qF "Environment=\"COPYCROW_CONF=${COPYCROW_TEST_SANDBOX}/100%% job.conf\"" "$unit"
+    grep -qF "WorkingDirectory=${COPYCROW_ROOT}" "$unit"
+    ! grep -q 'WorkingDirectory="' "$unit"
+}
+
+# Re-source the module from a COPY of the tree at <path> (which contains a
+# literal '%'): COPYCROW_ROOT is derived from BASH_SOURCE, so this reproduces
+# what an install from such a path actually generates. NOT called in a command
+# substitution — the re-sourced module must land in the calling shell.
+_timer_pct_root() {
+    local pct_root="$1"
+    mkdir -p "$pct_root"
+    cp -r "${COPYCROW_ROOT}/src" "$pct_root/"
+    cp "${COPYCROW_ROOT}/copycrow.sh" "$pct_root/"
+    COPYCROW_ROOT="$pct_root"
+    source "${pct_root}/src/timer-generator.sh"
+}
+
+@test "timer_generate: %-escapes ExecStart when the install root contains %" {
+    # systemd expands %-specifiers in ExecStart as well: an unescaped '%' in
+    # the install path makes the timer exec a nonexistent command (while
+    # WorkingDirectory, already escaped, still points at the right tree).
+    local pct_root="${COPYCROW_TEST_SANDBOX}/100%root"
+    _timer_pct_root "$pct_root"
+
+    run timer_generate "timer_job"
+    [ "$status" -eq 0 ]
+
+    local unit="$HOME/.config/systemd/user/copycrow-timer_job.service"
+    ! grep -qF "ExecStart=\"${pct_root}/copycrow.sh\"" "$unit"
+    grep -qF "ExecStart=\"${pct_root//%/%%}/copycrow.sh\" auto timer_job" "$unit"
+
+    # Independent oracle: systemd itself must resolve the command to the real
+    # path. Only asserted where systemd-analyze exists.
+    if command -v systemd-analyze >/dev/null 2>&1; then
+        run systemd-analyze verify "$unit"
+        [[ "$output" != *"is not executable"* ]]
+    fi
+}
+
+@test "timer_generate_verify: %-escapes ExecStart when the install root contains %" {
+    _stub_systemctl 0
+    local pct_root="${COPYCROW_TEST_SANDBOX}/200%root"
+    _timer_pct_root "$pct_root"
+    _verify_timer_conf
+
+    run timer_generate_verify
+    [ "$status" -eq 0 ]
+
+    local unit="$HOME/.config/systemd/user/copycrow-verify.service"
+    ! grep -qF "ExecStart=\"${pct_root}/copycrow.sh\"" "$unit"
+    grep -qF "ExecStart=\"${pct_root//%/%%}/copycrow.sh\" verify-all" "$unit"
+}
+
+@test "timer_generate: emits the BORG_PASSPHRASE warning once per install, not per job" {
+    _stub_systemctl 0
+    export BORG_PASSPHRASE="secret-not-stored"
+    _load_timer_conf << 'EOF'
+[global]
+verify_schedule = monthly
+
+[job_a]
+type = automatic
+sources = /home
+host = local
+remote_path = /tmp/ra
+schedule = daily
+
+[job_b]
+type = automatic
+sources = /home
+host = local
+remote_path = /tmp/rb
+schedule = weekly
+EOF
+    export COPYCROW_CONF="${COPYCROW_TEST_SANDBOX}/test.conf"
+
+    run timer_generate_all
+    [ "$status" -eq 0 ]
+    [ "$(grep -c 'BORG_PASSPHRASE detected' <<< "$output")" -eq 1 ]
+    ! grep -rq "secret-not-stored" "$HOME"
+}
+
+@test "timer_generate_all: emits the env-file reuse notice once per install" {
+    # The notice describes install-wide state (the env file is reused), so it
+    # belongs once per run — not once per generated unit (job + verify).
+    _stub_systemctl 0
+    export BORG_PASSCOMMAND="pass show copycrow/borg"
+    timer_generate "timer_job" >/dev/null 2>&1 || true
+    [ -f "$HOME/.config/copycrow/borg.env" ]
+    unset BORG_PASSCOMMAND
+
+    _verify_timer_conf
+    run timer_generate_all
+    [ "$status" -eq 0 ]
+    [ "$(grep -c 'reusing' <<< "$output")" -eq 1 ]
+}
+
+@test "timer_generate_verify: warns when BORG_PASSPHRASE cannot be stored" {
+    # The verify unit needs the passphrase mechanism as much as job units:
+    # generating it must not stay silent about an unstorable passphrase.
+    _stub_systemctl 0
+    _verify_timer_conf
+    export BORG_PASSPHRASE="secret-not-stored"
+
+    run timer_generate_verify
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"BORG_PASSPHRASE detected"* ]]
+}
+
 # ───────────────────────────────────────────────────────────────────────────────
 # Programmable verify timer
 # ───────────────────────────────────────────────────────────────────────────────
@@ -233,6 +354,41 @@ EOF
     grep -qF "Environment=\"COPYCROW_CONF=${COPYCROW_CONF}\"" \
         "$HOME/.config/systemd/user/copycrow-verify.service"
     [[ "$output" == *"Timer enabled: copycrow-verify"* ]]
+}
+
+@test "timer_generate_verify: wires EnvironmentFile and %-escapes the conf path" {
+    # `borg check` needs the same passphrase mechanism as backups: without
+    # EnvironmentFile every scheduled verification of an encrypted repo
+    # fails with a missing-passphrase error.
+    _stub_systemctl 0
+    _verify_timer_conf
+    export BORG_PASSCOMMAND="pass show copycrow/borg"
+    export COPYCROW_CONF="${COPYCROW_TEST_SANDBOX}/200% verify.conf"
+    run timer_generate_verify
+    [ "$status" -eq 0 ]
+
+    local unit="$HOME/.config/systemd/user/copycrow-verify.service"
+    local env_file="$HOME/.config/copycrow/borg.env"
+    [ -f "$env_file" ]
+    grep -qF "EnvironmentFile=${env_file}" "$unit"
+    grep -qF "Environment=\"COPYCROW_CONF=${COPYCROW_TEST_SANDBOX}/200%% verify.conf\"" "$unit"
+    grep -qF "WorkingDirectory=${COPYCROW_ROOT}" "$unit"
+}
+
+@test "timer_generate_verify: reuses the existing env file when PASSCOMMAND is unset" {
+    _stub_systemctl 0
+    _verify_timer_conf
+    export BORG_PASSCOMMAND="pass show copycrow/borg"
+    timer_generate_verify >/dev/null 2>&1 || true
+    local env_file="$HOME/.config/copycrow/borg.env"
+    [ -f "$env_file" ]
+
+    unset BORG_PASSCOMMAND
+    run timer_generate_verify
+    [ "$status" -eq 0 ]
+    grep -qF "EnvironmentFile=${env_file}" \
+        "$HOME/.config/systemd/user/copycrow-verify.service"
+    [[ "$output" == *"reusing"* ]]
 }
 
 @test "timer_generate_verify: propagates enable failure (rc 1)" {

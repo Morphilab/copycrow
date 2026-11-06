@@ -53,8 +53,9 @@ STUB
     export PATH="${stub_bin}:${PATH}"
 
     export COPYCROW_CONF="${COPYCROW_TEST_SANDBOX}/test.conf"
-    cat > "$COPYCROW_CONF" << 'EOF'
+    cat > "$COPYCROW_CONF" << EOF
 [global]
+logs_dir = ${COPYCROW_TEST_SANDBOX}/logs
 
 [timer_job]
 type = automatic
@@ -77,7 +78,9 @@ EOF
     source "${COPYCROW_ROOT}/src/config-parser.sh"
     config_load "$COPYCROW_CONF"
     CONFIG_LOADED="1"
-    # Production wiring: copycrow.sh sources backup-core BEFORE the TUI.
+    # Production wiring: copycrow.sh sources safety and backup-core BEFORE
+    # the TUI (the TUI paths run the backends under the same job lock).
+    source "${COPYCROW_ROOT}/src/safety.sh"
     source "${COPYCROW_ROOT}/src/backup-core.sh"
     source "${COPYCROW_ROOT}/src/tui.sh"
 }
@@ -152,8 +155,9 @@ teardown() {
 }
 
 @test "tui_migrate_config: migrates legacy conf and reloads session" {
-    cat > "$COPYCROW_CONF" << 'EOF'
+    cat > "$COPYCROW_CONF" << EOF
 [global]
+logs_dir = ${COPYCROW_TEST_SANDBOX}/logs
 compresion = lz4
 
 [timer_job]
@@ -181,8 +185,9 @@ EOF
 }
 
 @test "tui_sync_job: lists only cloud-enabled jobs" {
-    cat > "$COPYCROW_CONF" << 'EOF'
+    cat > "$COPYCROW_CONF" << EOF
 [global]
+logs_dir = ${COPYCROW_TEST_SANDBOX}/logs
 
 [cloudy]
 type = manual
@@ -208,8 +213,9 @@ EOF
 }
 
 @test "tui_sync_job: failed backend renders failure dialog, survives" {
-    cat > "$COPYCROW_CONF" << 'EOF'
+    cat > "$COPYCROW_CONF" << EOF
 [global]
+logs_dir = ${COPYCROW_TEST_SANDBOX}/logs
 
 [cloudy]
 type = manual
@@ -273,8 +279,9 @@ STUB
 exit 0
 STUB
     chmod +x "${COPYCROW_TEST_SANDBOX}/bin/borg"
-    cat > "$COPYCROW_CONF" << 'EOF'
+    cat > "$COPYCROW_CONF" << EOF
 [global]
+logs_dir = ${COPYCROW_TEST_SANDBOX}/logs
 mount_dir = mnt-custom
 
 [timer_job]
@@ -296,8 +303,9 @@ EOF
 exit 0
 STUB
     chmod +x "${COPYCROW_TEST_SANDBOX}/bin/borg"
-    cat > "$COPYCROW_CONF" << 'EOF'
+    cat > "$COPYCROW_CONF" << EOF
 [global]
+logs_dir = ${COPYCROW_TEST_SANDBOX}/logs
 mount_dir = mnt-custom
 
 [timer_job]
@@ -314,4 +322,49 @@ EOF
     local expected="${COPYCROW_ROOT}/mnt-custom/.tui-output"
     [[ " ${TEMP_FILES[*]:-} " == *" ${expected} "* ]]
     [ ! -e "$expected" ]
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Job locking parity with the CLI (the TUI must not bypass the job lock)
+# ───────────────────────────────────────────────────────────────────────────────
+
+@test "tui_create_backup: a held job lock blocks the run (no backend invocation)" {
+    cat > "${COPYCROW_TEST_SANDBOX}/bin/borg" << 'STUB'
+#!/usr/bin/env bash
+printf 'borg-called\n' >> "${BORG_CALLED_LOG:?}"
+exit 0
+STUB
+    chmod +x "${COPYCROW_TEST_SANDBOX}/bin/borg"
+    export BORG_CALLED_LOG="${COPYCROW_TEST_SANDBOX}/borg-called.log"
+    : > "$BORG_CALLED_LOG"
+
+    # A concurrent run (timer/CLI) holds the job lock.
+    safety_lock_acquire timer_job
+
+    FAKE_CHOICE=timer_job tui_create_backup >/dev/null 2>&1 || true
+    safety_lock_release
+
+    [ ! -s "$BORG_CALLED_LOG" ]
+    grep -q "already in progress" "$TUI_LOG"
+    ! grep -q "Backup created successfully" "$TUI_LOG"
+}
+
+@test "tui_verify_repo: a held job lock blocks the run (no backend invocation)" {
+    cat > "${COPYCROW_TEST_SANDBOX}/bin/borg" << 'STUB'
+#!/usr/bin/env bash
+printf 'borg-called\n' >> "${BORG_CALLED_LOG:?}"
+exit 0
+STUB
+    chmod +x "${COPYCROW_TEST_SANDBOX}/bin/borg"
+    export BORG_CALLED_LOG="${COPYCROW_TEST_SANDBOX}/borg-called.log"
+    : > "$BORG_CALLED_LOG"
+
+    safety_lock_acquire timer_job
+
+    FAKE_CHOICE=timer_job tui_verify_repo >/dev/null 2>&1 || true
+    safety_lock_release
+
+    [ ! -s "$BORG_CALLED_LOG" ]
+    grep -q "already in progress" "$TUI_LOG"
+    ! grep -q "Verify OK" "$TUI_LOG"
 }

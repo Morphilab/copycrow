@@ -386,7 +386,35 @@ EOF
     done
 }
 
-@test "retention: accepts only --keep-* flag/number pairs" {
+@test "sources: rejects any token starting with '-' (borg option injection)" {
+    run config_validate_value "sources" "--dry-run /home"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"must not start with"* ]]
+
+    run config_validate_value "sources" "/home -oProxyCommand=evil"
+    [ "$status" -ne 0 ]
+
+    run config_validate_value "sources" "/home /etc"
+    [ "$status" -eq 0 ]
+}
+
+@test "config_load: fails fast on a sources token that looks like a borg option" {
+    cat > /tmp/copycrow-test-src-dash.conf << 'EOF'
+[global]
+
+[dash_job]
+type = manual
+sources = --dry-run /home
+host = local
+remote_path = /tmp/repo
+EOF
+    run config_load /tmp/copycrow-test-src-dash.conf
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"must not start with"* ]]
+    rm -f /tmp/copycrow-test-src-dash.conf
+}
+
+@test "retention: accepts only --keep-* flag/value pairs" {
     run config_validate_value "retention" "--keep-daily 7 --keep-weekly 4"
     [ "$status" -eq 0 ]
 
@@ -397,6 +425,49 @@ EOF
     [ "$status" -ne 0 ]
 
     run config_validate_value "retention" "; rm -rf /"
+    [ "$status" -ne 0 ]
+
+    # Dangling flag / bare number / flag-after-flag: borg prune would fail
+    # at runtime, so the config must fail fast here.
+    run config_validate_value "retention" "--keep-daily"
+    [ "$status" -ne 0 ]
+
+    run config_validate_value "retention" "7"
+    [ "$status" -ne 0 ]
+
+    run config_validate_value "retention" "--keep-daily 7 8"
+    [ "$status" -ne 0 ]
+
+    run config_validate_value "retention" "--keep-daily 7 --keep-hourly"
+    [ "$status" -ne 0 ]
+}
+
+@test "retention: --keep-last and --keep-within accept their value grammars" {
+    # borg prune also supports --keep-last N (number) and
+    # --keep-within <int><char> with char in H/d/w/m/y (interval).
+    run config_validate_value "retention" "--keep-last 1"
+    [ "$status" -eq 0 ]
+
+    run config_validate_value "retention_default" "--keep-last 3 --keep-daily 7"
+    [ "$status" -eq 0 ]
+
+    run config_validate_value "retention" "--keep-within 2d"
+    [ "$status" -eq 0 ]
+
+    run config_validate_value "retention" "--keep-within 12H --keep-daily 7"
+    [ "$status" -eq 0 ]
+
+    # Malformed values still fail fast: bare number, bad unit, dangling flag.
+    run config_validate_value "retention" "--keep-within 2"
+    [ "$status" -ne 0 ]
+
+    run config_validate_value "retention" "--keep-within 2x"
+    [ "$status" -ne 0 ]
+
+    run config_validate_value "retention" "--keep-within"
+    [ "$status" -ne 0 ]
+
+    run config_validate_value "retention" "--keep-last"
     [ "$status" -ne 0 ]
 }
 

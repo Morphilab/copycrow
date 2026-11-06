@@ -26,8 +26,11 @@ setup() {
     source "${COPYCROW_ROOT}/src/safety.sh"
     source "${COPYCROW_ROOT}/src/backup-core.sh"
 
-    # Deterministic borg environment (no cache pollution, no interactive prompt).
+    # Deterministic borg environment (no cache/config/security pollution of
+    # the caller's HOME, no interactive prompt).
     export BORG_CACHE_DIR="${COPYCROW_TEST_SANDBOX}/borgcache"
+    export BORG_CONFIG_DIR="${COPYCROW_TEST_SANDBOX}/borgconfig"
+    export BORG_SECURITY_DIR="${COPYCROW_TEST_SANDBOX}/borgsecurity"
     export BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK=yes
 
     mkdir -p "${COPYCROW_TEST_SANDBOX}/data" "${COPYCROW_TEST_SANDBOX}/repo" "${COPYCROW_ROOT}/logs"

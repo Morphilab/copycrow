@@ -57,6 +57,24 @@ EOF
     [ "$output" = '/backups/copycrow' ]
 }
 
+@test "backup_log: an unwritable log dir WARNs but never aborts (best-effort)" {
+    # A full/read-only disk must never turn a finished backup into a failure:
+    # logging warns loudly on stderr and the flow continues.
+    local ro_dir="${COPYCROW_TEST_SANDBOX}/read-only"
+    mkdir -p "$ro_dir"
+    chmod 0500 "$ro_dir"
+
+    _load_conf << EOF
+[global]
+logs_dir = ${ro_dir}/logs
+EOF
+
+    run backup_log "INFO" "job_x" "create" "ok"
+    chmod 0700 "$ro_dir"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"cannot create log directory"* ]]
+}
+
 # ───────────────────────────────────────────────────────────────────────────────
 # backup_build_repo_url / backup_safe_archive_name
 # ───────────────────────────────────────────────────────────────────────────────
@@ -404,6 +422,7 @@ REC
     _make_hook_recorder
     _load_conf << EOF
 [global]
+logs_dir = ${COPYCROW_TEST_SANDBOX}/logs-sandbox
 on_failure_cmd = ${PATH_STUB_DIR}/onfail-recorder
 
 [j]
@@ -616,4 +635,123 @@ SCRIPTEOF
     run bash "$script"
     [ "$status" -eq 0 ]
     [[ "$output" == *"KEPT=yes"* ]]
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# backup_create: source path list hardening (no option injection, no globbing)
+# ───────────────────────────────────────────────────────────────────────────────
+
+@test "backup_create: sources arrive after '--' and are never glob-expanded" {
+    mkdir -p "${COPYCROW_TEST_SANDBOX}/data"
+    : > "${COPYCROW_TEST_SANDBOX}/data/a.txt"
+    : > "${COPYCROW_TEST_SANDBOX}/data/b.txt"
+
+    cat > "${PATH_STUB_DIR}/borg" << 'STUB'
+#!/usr/bin/env bash
+case "$1" in
+    info) exit 0 ;;
+esac
+printf '%s\n' "$*" >> "${BORG_ARGV_LOG:?}"
+exit 0
+STUB
+    chmod +x "${PATH_STUB_DIR}/borg"
+    export PATH="${PATH_STUB_DIR}:${PATH}"
+    export BORG_ARGV_LOG="${COPYCROW_TEST_SANDBOX}/borg-argv.log"
+    : > "$BORG_ARGV_LOG"
+
+    _load_conf << EOF
+[global]
+logs_dir = ${COPYCROW_TEST_SANDBOX}/logs
+
+[glob_job]
+type = manual
+sources = ${COPYCROW_TEST_SANDBOX}/data ${COPYCROW_TEST_SANDBOX}/data/*
+host = local
+remote_path = ${COPYCROW_TEST_SANDBOX}/repo
+EOF
+
+    run backup_create "glob_job" "manual"
+    [ "$status" -eq 0 ]
+
+    local create_line
+    create_line="$(grep -m1 '^create ' "$BORG_ARGV_LOG")"
+    [ -n "$create_line" ]
+    # `--` separates the sources: a token can never be read as a borg option.
+    [[ "$create_line" == *" -- ${COPYCROW_TEST_SANDBOX}/data ${COPYCROW_TEST_SANDBOX}/data/*"* ]]
+    # The glob stays literal: no expansion against the caller's CWD.
+    [[ "$create_line" != *"a.txt"* ]]
+}
+
+@test "backup_notify_failure: hook argv keeps wildcards literal (no CWD globbing)" {
+    cat > "${COPYCROW_TEST_SANDBOX}/hook.sh" << 'HOOK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "${HOOK_LOG:?}"
+HOOK
+    chmod +x "${COPYCROW_TEST_SANDBOX}/hook.sh"
+
+    _load_conf << EOF
+[global]
+logs_dir = ${COPYCROW_TEST_SANDBOX}/logs
+on_failure_cmd = ${COPYCROW_TEST_SANDBOX}/hook.sh *
+EOF
+
+    export HOOK_LOG="${COPYCROW_TEST_SANDBOX}/hook.log"
+    run backup_notify_failure "glob_job" "arch-1" "7"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$HOOK_LOG")" = "*" ]
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# backup_init_repo — the probe must distinguish "missing" from "cannot open"
+# ───────────────────────────────────────────────────────────────────────────────
+
+@test "backup_init_repo: an existing repo that cannot be opened is reported, never re-initialized" {
+    # borg info rejects the credentials (repo EXISTS, wrong passphrase): the
+    # flow must NOT fall through to `borg init`, whose "A repository already
+    # exists" points the operator at initialization instead of credentials.
+    CONFIG_GLOBAL["logs_dir"]="${COPYCROW_TEST_SANDBOX}/logs-sandbox"
+    export INIT_CALLED_LOG="${COPYCROW_TEST_SANDBOX}/init-called.log"
+    cat > "${PATH_STUB_DIR}/borg" << 'STUB'
+#!/usr/bin/env bash
+case "$1" in
+    info)
+        echo "Passphrase supplied in BORG_PASSPHRASE, by BORG_PASSCOMMAND, or via BORG_PASSPHRASE_FD is incorrect." >&2
+        exit 2 ;;
+    init)
+        echo "init-called" >> "${INIT_CALLED_LOG:?}"
+        exit 0 ;;
+esac
+exit 0
+STUB
+    chmod +x "${PATH_STUB_DIR}/borg"
+    export PATH="${PATH_STUB_DIR}:${PATH}"
+
+    run backup_init_repo "${COPYCROW_TEST_SANDBOX}/repo" "job_x"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"cannot be opened"* ]]
+    [[ "$output" != *"Could not initialize repository"* ]]
+    [ ! -e "$INIT_CALLED_LOG" ]
+}
+
+@test "backup_init_repo: a missing repo still falls through to borg init" {
+    CONFIG_GLOBAL["logs_dir"]="${COPYCROW_TEST_SANDBOX}/logs-sandbox"
+    export INIT_CALLED_LOG="${COPYCROW_TEST_SANDBOX}/init-called.log"
+    cat > "${PATH_STUB_DIR}/borg" << 'STUB'
+#!/usr/bin/env bash
+case "$1" in
+    info)
+        echo "Repository ${COPYCROW_TEST_SANDBOX}/repo does not exist." >&2
+        exit 2 ;;
+    init)
+        echo "init-called" >> "${INIT_CALLED_LOG:?}"
+        exit 0 ;;
+esac
+exit 0
+STUB
+    chmod +x "${PATH_STUB_DIR}/borg"
+    export PATH="${PATH_STUB_DIR}:${PATH}"
+
+    run backup_init_repo "${COPYCROW_TEST_SANDBOX}/repo" "job_x"
+    [ "$status" -eq 0 ]
+    [ -e "$INIT_CALLED_LOG" ]
 }
