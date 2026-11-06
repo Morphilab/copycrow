@@ -210,7 +210,8 @@ tui_verify_repo() {
 
     whiptail --title "Verifying..." --infobox "Running borg check for '$selection'..." 8 55
 
-    if backup_verify "$selection" > "$tmp_out" 2>&1; then
+    # Same job lock as the CLI: never verify a repo while its backup runs.
+    if safety_lock_run "$selection" backup_verify "$selection" > "$tmp_out" 2>&1; then
         whiptail --title "Verify OK" --scrolltext --msgbox "$(cat "$tmp_out")" 22 70
     else
         whiptail --title "Verify FAILED" --scrolltext --msgbox "$(cat "$tmp_out")" 22 70
@@ -308,7 +309,9 @@ tui_create_backup() {
 
         whiptail --title "Creating..." --infobox "Creating backup for job '$selection'..." 8 50
 
-        if backup_create "$selection" "manual" > "$tmp_out" 2>&1; then
+        # Same job lock as the CLI/timers: one run per job, whichever
+        # frontend starts it. A busy job fails here (message into the dialog).
+        if safety_lock_run "$selection" backup_create "$selection" "manual" > "$tmp_out" 2>&1; then
             whiptail --title "Success" --msgbox "Backup created successfully" 8 50
         else
             whiptail --title "Error" --scrolltext --msgbox "$(cat "$tmp_out")" 22 70

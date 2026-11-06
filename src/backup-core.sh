@@ -4,9 +4,10 @@
 # Borg Backup wrapper with detailed JSON logs
 # ═══════════════════════════════════════════════════════════════════════════════
 # shellcheck disable=SC2086,SC2090
-# SC2086/SC2090: $sources, $retention and $encryption are intentionally
-#                expanded unquoted (word-splitting) so borg receives multiple
-#                paths/flags as separate arguments.
+# SC2086/SC2090: $retention and $encryption are intentionally expanded
+#                unquoted (word-splitting) so borg receives multiple flags as
+#                separate arguments. Path lists (sources, hook argv) are
+#                tokenized into quoted arrays instead.
 set -euo pipefail
 
 COPYCROW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -90,27 +91,6 @@ _interactive_stdin_available() {
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
-# backup_init
-# Verifies borg is installed and creates required directories
-# ───────────────────────────────────────────────────────────────────────────────
-backup_init() {
-    if ! command -v borg &>/dev/null; then
-        echo "ERROR: borg is not installed. Run: sudo apt install borgbackup" >&2
-        return 1
-    fi
-
-    if ! command -v whiptail &>/dev/null; then
-        echo "ERROR: whiptail is not installed. Run: sudo apt install whiptail" >&2
-        return 1
-    fi
-
-    mkdir -p "${COPYCROW_ROOT}/$(config_get_global 'mount_dir')"
-    mkdir -p "${COPYCROW_ROOT}/$(config_get_global 'logs_dir')"
-
-    return 0
-}
-
-# ───────────────────────────────────────────────────────────────────────────────
 # _backup_logs_dir
 # Resolves the effective log directory: absolute honored verbatim, relative
 # under the project root, empty falls back to <root>/logs. Single source of
@@ -151,6 +131,8 @@ backup_purge_old_logs() {
 # First 4 args: level, job, action, status
 # Remaining args: key=value extras
 # logs_dir may be absolute (used by tests/sandboxes) or relative to project root.
+# Best-effort: a missing/unwritable log target warns on stderr but NEVER fails
+# the caller — a full disk must not invalidate a finished backup.
 # ───────────────────────────────────────────────────────────────────────────────
 backup_log() {
     local level="$1" job="$2" action="$3" status="$4"
@@ -167,7 +149,10 @@ backup_log() {
 
     local log_file="${log_dir}/copycrow-${date_log}.log"
 
-    mkdir -p "$log_dir"
+    if ! mkdir -p "$log_dir" 2>/dev/null; then
+        echo "WARNING: cannot create log directory '$log_dir' (continuing without a log)" >&2
+        return 0
+    fi
 
     local json="{\"ts\":\"${ts}\",\"level\":\"$(_json_escape "$level")\",\"job\":\"$(_json_escape "$job")\",\"action\":\"$(_json_escape "$action")\""
 
@@ -183,7 +168,10 @@ backup_log() {
 
     json+=",\"status\":\"$(_json_escape "$status")\"}"
 
-    printf '%s\n' "$json" >> "$log_file"
+    if ! printf '%s\n' "$json" >> "$log_file"; then
+        echo "WARNING: cannot write log file '$log_file' (continuing without a log)" >&2
+        return 0
+    fi
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -258,16 +246,35 @@ backup_find_repo_for_archive() {
 
 # ───────────────────────────────────────────────────────────────────────────────
 # backup_init_repo
-# Initializes a Borg repository if it doesn't exist
+# Initializes a Borg repository if it doesn't exist. The probe distinguishes
+# a MISSING repo (init is the right next step) from one that EXISTS but
+# rejects the supplied credentials: in that case borg answers `borg init`
+# with "A repository already exists", pointing the operator at the wrong fix
+# (a credentials problem, not a setup one).
 # ───────────────────────────────────────────────────────────────────────────────
 backup_init_repo() {
     local repo_url="$1"
     local section="${2:-unknown}"
 
-    if borg info "$repo_url" &>/dev/null; then
+    local probe_out="" probe_rc=0
+    _run_capture probe_out borg info "$repo_url" || probe_rc=$?
+    if (( probe_rc == 0 )); then
         backup_log "DEBUG" "$section" "init_repo" "skipped" "repo=${repo_url}" "reason=already_exists"
         return 0
     fi
+    # Not missing AND borg talks about a passphrase: the repo is there but
+    # the credentials cannot open it — never re-init over that.
+    if [[ "$probe_out" != *"does not exist"* ]] && grep -qi "passphrase" <<< "$probe_out"; then
+        backup_log "ERROR" "$section" "init_repo" "failed" \
+            "repo=${repo_url}" "error=repo_exists_wrong_passphrase"
+        echo "ERROR: The repository exists but cannot be opened (wrong passphrase or key material): ${repo_url}" >&2
+        [[ -n "$probe_out" ]] && echo "  ${probe_out}" >&2
+        echo "" >&2
+        echo "  Timers cannot prompt: configure BORG_PASSCOMMAND (see README)." >&2
+        return 1
+    fi
+    # Any other probe failure (repo missing, network down, ...) keeps the
+    # original path: `borg init` reports the actual problem from its own run.
 
     backup_log "INFO" "$section" "init_repo" "started" "repo=${repo_url}"
     echo "Initializing repository: $repo_url..."
@@ -343,8 +350,12 @@ backup_check_prerequisites() {
     local sources
     sources="$(config_get_var "$section" "sources")"
     local any_exists=false
+    # Tokenized without pathname expansion: a wildcard in a source name stays
+    # literal instead of expanding against the caller's CWD.
+    local -a src_list=()
+    read -r -a src_list <<< "$sources"
     local src
-    for src in $sources; do
+    for src in "${src_list[@]}"; do
         if [[ -e "$src" ]]; then
             any_exists=true
             backup_log "DEBUG" "$section" "check" "ok" "source=${src}" "exists=true"
@@ -408,9 +419,9 @@ backup_check_prerequisites() {
 # backup_notify_failure
 # Runs the user hook [global] on_failure_cmd when a backup/verification FAILS.
 # Contract (README + copycrow.conf.example):
-#   * the hook string is word-split UNQUOTED — same intentional policy as
-#     sources/retention; charset validation at load time forbids
-#     ; & | $ ` < > \ so no shell/injection surface exists;
+#   * the hook string is split on whitespace into argv (command + args);
+#     charset validation at load time forbids ; & | $ ` < > \ so no
+#     shell/injection surface exists;
 #   * context is exposed ONLY via environment variables;
 #   * a failing hook is logged (WARN) but NEVER changes the backup's result.
 # ───────────────────────────────────────────────────────────────────────────────
@@ -425,13 +436,17 @@ backup_notify_failure() {
         "hook=${hook}" "archive=${archive}" "exit_code=${exit_code}"
 
     local out="" rc=0
-    # Word-splitting INTENTIONAL: see function header (charset-whitelisted).
-    # Capture pattern per AGENTS.md: never a bare `out=$(cmd)` under set -e.
+    # Tokenized into argv WITHOUT word-splitting side effects: a '*' or '?'
+    # in an argument reaches the hook literally, never glob-expanded against
+    # the caller's CWD (charset whitelisted at load time; see header).
+    local -a hook_argv=()
+    read -r -a hook_argv <<< "$hook"
+    # Capture with an explicit rc: a bare `out=$(cmd)` would abort under set -e.
     out=$(
         export COPYCROW_FAILED_JOB="$section" \
                COPYCROW_FAILURE_ARCHIVE="$archive" \
                COPYCROW_FAILURE_EXIT_CODE="$exit_code"
-        ${hook}
+        "${hook_argv[@]}"
     ) || rc=$?
 
     if (( rc == 0 )); then
@@ -506,13 +521,13 @@ backup_create() {
 
         echo ""
         echo "Equivalent command (not executed):"
-        printf '  borg create --info --stats --dry-run --compression %q %q::%q %s\n' \
+        printf '  borg create --info --stats --dry-run --compression %q %q::%q -- %s\n' \
             "$compression" "$repo_url" "$name" "$sources"
         return 0
     fi
 
     local cmd_safe
-    cmd_safe=$(printf 'borg create --info --stats --compression %q %q::%q %s' \
+    cmd_safe=$(printf 'borg create --info --stats --compression %q %q::%q -- %s' \
         "$compression" "$repo_url" "$name" "$sources")
 
     backup_log "INFO" "$section" "create" "started" "archive=${name}" "cmd=${cmd_safe}" "repo=${repo_url}"
@@ -543,6 +558,12 @@ backup_create() {
 
     local borg_output="" borg_stderr="" exit_code=0 interactive_run=false
 
+    # Sources as an ARRAY (no globbing, no word-splitting back), preceded by
+    # `--`: a source token can never be parsed as a borg option — neither by
+    # config validation nor by borg itself.
+    local -a src_list=()
+    read -r -a src_list <<< "$sources"
+
     if _borg_interactive; then
         # Interactive: stream output directly to the terminal.
         borg create \
@@ -550,7 +571,8 @@ backup_create() {
             --stats \
             --compression "${compression}" \
             "${repo_url}::${name}" \
-            ${sources} || exit_code=$?
+            -- \
+            "${src_list[@]}" || exit_code=$?
         interactive_run=true
     else
         # Non-interactive (timers): capture output but NEVER die on failure.
@@ -559,7 +581,8 @@ backup_create() {
             --stats \
             --compression "${compression}" \
             "${repo_url}::${name}" \
-            ${sources} || exit_code=$?
+            -- \
+            "${src_list[@]}" || exit_code=$?
         borg_stderr="$borg_output"
     fi
 
@@ -883,17 +906,45 @@ backup_verify() {
 # backup_verify_all
 # Verifies EVERY configured job's repository. Attempts all of them even if
 # some fail (one broken repo must not hide another); nonzero if any failed.
+# Each job runs under its own lock: contending with a running backup would
+# make `borg check` fail spuriously (and fire on_failure hooks), so a busy
+# job is skipped with a warning instead — never counted as a failure.
+# A lock that CANNOT be taken (nobody holds it, locking is impossible here) is
+# the opposite case: it counts as a failure, so the integrity timer can never
+# report success while verifying nothing.
 # Word-splitting of config_get_sections output is intentional.
 # ───────────────────────────────────────────────────────────────────────────────
 backup_verify_all() {
-    local failures=0 section
+    local failures=0 skipped=0 section lock_rc
     for section in $(config_get_sections); do
+        lock_rc=0
+        safety_lock_acquire "$section" || lock_rc=$?
+        if (( lock_rc == 1 )); then
+            backup_log "WARN" "$section" "verify" "skipped" "reason=job_busy"
+            echo "WARNING: [$section] is busy (backup in progress); skipping verification" >&2
+            skipped=$((skipped + 1))
+            continue
+        elif (( lock_rc != 0 )); then
+            backup_log "ERROR" "$section" "verify" "failed" "error=lock_unavailable"
+            echo "ERROR: [$section] cannot be locked; verification not attempted" >&2
+            failures=$((failures + 1))
+            continue
+        fi
         backup_verify "$section" || failures=$((failures + 1))
+        safety_lock_release
     done
 
+    # Reported even alongside failures: a skip is not a pass, and the operator
+    # needs the full picture to trust the run.
+    if (( skipped > 0 )); then
+        echo "WARNING: ${skipped} job(s) skipped verification (busy with a running backup)" >&2
+    fi
     if (( failures > 0 )); then
         echo "ERROR: ${failures} repository(ies) failed verification" >&2
         return 1
+    fi
+    if (( skipped > 0 )); then
+        return 0
     fi
     echo "All repositories verified OK."
     return 0

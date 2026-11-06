@@ -3,7 +3,8 @@
 # Ad hoc:     source /path/to/copycrow/completions/copycrow.bash
 # Persistent: cp completions/copycrow.bash \
 #               ~/.local/share/bash-completion/completions/copycrow
-# Job/host names are parsed from the ACTIVE copycrow.conf (honors COPYCROW_CONF).
+# Job/host names come from COPYCROW_CONF, else COPYCROW_ROOT/copycrow.conf,
+# else ./copycrow.conf (completion-only fallback for ad-hoc sourcing).
 # ───────────────────────────────────────────────────────────────────────────────
 
 _copycrow_commands() {
@@ -11,15 +12,30 @@ _copycrow_commands() {
         uninstall status verify verify-all sync doctor help --version
 }
 
+# Resolve the active config: explicit override first, then the project root,
+# then the current directory (completion-only fallback for ad-hoc sourcing
+# outside a checkout).
+_copycrow_conf() {
+    if [[ -n "${COPYCROW_CONF:-}" ]]; then
+        printf '%s\n' "${COPYCROW_CONF}"
+    elif [[ -n "${COPYCROW_ROOT:-}" ]]; then
+        printf '%s\n' "${COPYCROW_ROOT}/copycrow.conf"
+    else
+        printf '%s\n' "./copycrow.conf"
+    fi
+}
+
 _copycrow_jobs() {
-    local conf="${COPYCROW_CONF:-./copycrow.conf}"
+    local conf
+    conf="$(_copycrow_conf)"
     [[ -f "$conf" ]] || return 0
     # Section headers minus brackets; 'global' is settings, not a job.
     sed -nE 's/^\[([a-zA-Z0-9_-]+)\][[:space:]]*$/\1/p' "$conf" | grep -vx global
 }
 
 _copycrow_hosts() {
-    local conf="${COPYCROW_CONF:-./copycrow.conf}"
+    local conf
+    conf="$(_copycrow_conf)"
     [[ -f "$conf" ]] || return 0
     # shellcheck disable=SC2016  # sed pattern is literal, no expansion needed
     sed -nE 's/^[[:space:]]*host[[:space:]]*=[[:space:]]*([^[:space:]#]+)[[:space:]]*$/\1/p' "$conf" \

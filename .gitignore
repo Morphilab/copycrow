@@ -4,13 +4,10 @@
 
 # ================== Sensitive configuration ==================
 copycrow.conf
+copycrow.conf.migrated.*
 *.env
 *.env.*
 .env
-
-# ================== Local tooling (may contain credentials) ==================
-opencode.json
-.zcode/
 
 # ================== Runtime directories ==================
 .mnt/*
@@ -46,7 +43,7 @@ __pycache__/
 /backup-*
 
 # ================== Safety ==================
-# Ignore any file whose name contains "key", "secret", "password", etc.
+# Generic safety net: ignore files whose names contain common secret markers.
 *secret*
 *password*
 *credential*

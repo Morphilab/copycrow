@@ -26,7 +26,7 @@ _cleanup() {
         fi
     done
 
-    # Release job lock (unlocks kernel flock, closes fd, removes file).
+    # Release job lock (removes the file, then unlocks and closes the fd).
     if declare -F safety_lock_release >/dev/null 2>&1; then
         safety_lock_release
     elif [[ -n "${COPYCROW_LOCK_FILE:-}" ]] && [[ -f "${COPYCROW_LOCK_FILE}" ]]; then
@@ -58,13 +58,15 @@ safety_add_temp() {
 # ───────────────────────────────────────────────────────────────────────────────
 # _lock_inode_matches
 # True when the open fd still refers to the file currently at <path>.
-# Guards the classic unlink race: a releaser unlinks the path AFTER
-# unlocking, so an acquirer that opened the old inode before that and only
-# flocked after it would hold an ORPHANED file while the path gets recreated
-# for the next acquirer — two simultaneous holders on one job.
+# Guards the inode/path split inherent to flock on a lock FILE: an acquirer
+# can flock an inode that is no longer (or is about to stop being) the one
+# the path resolves to — e.g. it opened the old inode just as the previous
+# holder released — while the next acquirer locks the recreated path; without
+# the recheck both would hold the job simultaneously. Release unlinks BEFORE
+# unlocking, and this recheck closes the rest of the window: a vanished or
+# swapped path is a mismatch and triggers the acquire retry.
 # If the fd itself cannot be resolved (no /proc), fail OPEN: the check is a
-# hardening extra, not a prerequisite for locking. A vanished path IS a
-# mismatch: the acquire retry recreates and relocks it.
+# hardening extra, not a prerequisite for locking.
 # ───────────────────────────────────────────────────────────────────────────────
 _lock_inode_matches() {
     local path="$1" fd="$2" fd_ino path_ino
@@ -79,9 +81,13 @@ _lock_inode_matches() {
 # The lock lives as long as the file descriptor is open, so the KERNEL
 # releases it when the holder dies — there are no stale locks to recover and
 # no check-then-act window on the flock itself: flock is atomic. The one gap
-# flock cannot cover is the unlink-after-release of the lock FILE; the
-# post-flock inode recheck below closes it (see _lock_inode_matches).
-# Returns 0 if acquired, 1 if already locked.
+# flock cannot cover is that the lock is bound to the FILE'S INODE, not to
+# the path; the post-flock inode recheck below closes it
+# (see _lock_inode_matches).
+# Returns: 0 acquired, 1 already locked (someone else holds the job),
+# 2 locking is impossible here (no flock, unusable lock file). Callers that
+# may skip work must not treat 2 as "busy": a job nobody holds but nobody can
+# lock is an error, not a skip.
 # Requires: flock (util-linux, present on all supported Debian/Ubuntu targets).
 # ───────────────────────────────────────────────────────────────────────────────
 safety_lock_acquire() {
@@ -94,13 +100,19 @@ safety_lock_acquire() {
     # backup duration even across exec'd tools.
     if ! command -v flock >/dev/null 2>&1; then
         echo "ERROR: flock not found (util-linux). Cannot lock job '$job'." >&2
-        return 1
+        return 2
     fi
 
     local attempt
     for attempt in 1 2 3; do
-        : >> "$lock_file" 2>/dev/null || return 1
-        exec {COPYCROW_LOCK_FD}>> "$lock_file" || return 1
+        if ! : >> "$lock_file" 2>/dev/null; then
+            echo "ERROR: cannot create lock file '$lock_file' (job '$job' cannot be locked)." >&2
+            return 2
+        fi
+        if ! exec {COPYCROW_LOCK_FD}>> "$lock_file"; then
+            echo "ERROR: cannot open lock file '$lock_file' (job '$job' cannot be locked)." >&2
+            return 2
+        fi
 
         if ! flock -n "${COPYCROW_LOCK_FD}" 2>/dev/null; then
             exec {COPYCROW_LOCK_FD}>&-
@@ -119,7 +131,7 @@ safety_lock_acquire() {
         unset COPYCROW_LOCK_FD
         if [[ "$attempt" == 3 ]]; then
             echo "ERROR: lock file '$lock_file' kept changing during acquire; refusing a possible duplicate run." >&2
-            return 1
+            return 2
         fi
     done
 
@@ -131,31 +143,47 @@ safety_lock_acquire() {
 
 # ───────────────────────────────────────────────────────────────────────────────
 # safety_lock_release
-# Releases the current lock (unlocks, closes the fd, removes the file)
+# Releases the current lock (removes the file, then unlocks and closes the fd)
 # ───────────────────────────────────────────────────────────────────────────────
 safety_lock_release() {
+    # Unlink BEFORE unlocking: a releaser that removed the path only after the
+    # unlock would let a late acquirer flock the soon-orphaned inode while the
+    # path still resolved to it (passing the inode recheck), and the next
+    # acquirer then recreates the path — two simultaneous holders on one job.
+    # Removing the file while the lock is still held forces every acquirer
+    # past that point onto a fresh inode, which the recheck validates.
+    if [[ -n "${COPYCROW_LOCK_FILE:-}" ]] && [[ -f "${COPYCROW_LOCK_FILE}" ]]; then
+        rm -f "${COPYCROW_LOCK_FILE}" 2>/dev/null || true
+        unset COPYCROW_LOCK_FILE
+    fi
     if [[ -n "${COPYCROW_LOCK_FD:-}" ]]; then
         flock -u "${COPYCROW_LOCK_FD}" 2>/dev/null || true
-        exec {COPYCROW_LOCK_FD}>&- 2>/dev/null || true
+        # `exec` with only redirections would PERSIST them for the whole
+        # shell: a 2>/dev/null here would silently swallow every later
+        # message of the process. Close the fd bare, guarded for set -e.
+        exec {COPYCROW_LOCK_FD}>&- || true
         unset COPYCROW_LOCK_FD
-    fi
-    if [[ -n "${COPYCROW_LOCK_FILE:-}" ]] && [[ -f "${COPYCROW_LOCK_FILE}" ]]; then
-        rm -f "${COPYCROW_LOCK_FILE}"
-        unset COPYCROW_LOCK_FILE
     fi
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
 # safety_lock_run
-# Runs a command under lock, releases when done
+# Runs a command under lock, releases when done.
+# A busy job (rc 1) is reported as such; an impossible lock (rc 2) keeps its
+# own diagnosis instead of masquerading as "already in progress".
 # ───────────────────────────────────────────────────────────────────────────────
 safety_lock_run() {
     local job="$1"
     shift
 
-    if ! safety_lock_acquire "$job"; then
-        echo "ERROR: A backup is already in progress for '$job'" >&2
+    local lock_rc=0
+    safety_lock_acquire "$job" || lock_rc=$?
+    if (( lock_rc == 1 )); then
+        echo "ERROR: '$job' is already in progress (job lock held by another run)" >&2
         return 1
+    elif (( lock_rc != 0 )); then
+        # safety_lock_acquire already explained the failure on stderr.
+        return "$lock_rc"
     fi
 
     # Convention-compliant capture: explicit rc so a failing command cannot

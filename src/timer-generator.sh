@@ -16,6 +16,117 @@ _systemd_user_dir() {
 TIMER_PREFIX="copycrow"
 
 # ───────────────────────────────────────────────────────────────────────────────
+# systemd value helpers
+# systemd expands %-specifiers in unit settings (see systemd.unit(5)): a
+# literal '%' in a path (e.g. "Backups/100%") MUST be written '%%', or the
+# specifier is expanded — or the unit rejected — and the timer breaks.
+# WorkingDirectory=/EnvironmentFile= take a BARE path: double quotes are NOT
+# part of their syntax (a quoted value is rejected as "not absolute"), so the
+# only escaping needed there is % → %%. Environment= IS quoted (spaces must
+# stay literal) and its value is additionally C-escaped before expansion.
+# ───────────────────────────────────────────────────────────────────────────────
+_timer_systemd_path() {
+    printf '%s' "${1//%/%%}"
+}
+
+_timer_systemd_env_value() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '"%s"' "${value//%/%%}"
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# _timer_exec_start_line
+# ExecStart= for a copycrow subcommand. systemd expands %-specifiers in this
+# setting too, so the script path needs the same % → %% treatment as the other
+# path settings. The arguments are a fixed subcommand plus a section name
+# ([a-zA-Z0-9_-]), neither of which can carry a specifier.
+# ───────────────────────────────────────────────────────────────────────────────
+_timer_exec_start_line() {
+    printf 'ExecStart="%s/copycrow.sh" %s\n' \
+        "$(_timer_systemd_path "${COPYCROW_ROOT}")" "$1"
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# _timer_passphrase_notice
+# An exported BORG_PASSPHRASE cannot be persisted, so every scheduled run
+# (backups AND verifications) fails until BORG_PASSCOMMAND is configured.
+# Once per run: the notice is install-wide, not per generated unit.
+# ───────────────────────────────────────────────────────────────────────────────
+_timer_passphrase_notice() {
+    [[ -n "${BORG_PASSPHRASE:-}" && -z "${BORG_PASSCOMMAND:-}" ]] || return 0
+    [[ -z "${_TIMER_PASSPHRASE_NOTICE:-}" ]] || return 0
+    _TIMER_PASSPHRASE_NOTICE=1
+
+    echo "  ⚠  WARNING: BORG_PASSPHRASE detected, but it will NOT be stored on disk."
+    echo "     Scheduled runs cannot answer interactive passphrase prompts;"
+    echo "     they will fail until you configure BORG_PASSCOMMAND instead."
+    echo ""
+    echo "     Recommended (via pass):"
+    echo "       sudo apt install pass"
+    echo "       pass insert copycrow/borg"
+    echo "       export BORG_PASSCOMMAND='pass show copycrow/borg'"
+    echo ""
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# _timer_env_reused_notice
+# Says, once per run, that the units keep the env-file wiring of a previous
+# install because this shell lost the export.
+# ───────────────────────────────────────────────────────────────────────────────
+_timer_env_reused_notice() {
+    local env_file="${HOME}/.config/copycrow/borg.env"
+    [[ -z "${BORG_PASSCOMMAND:-}" && -f "$env_file" ]] || return 0
+    [[ -z "${_TIMER_ENV_REUSED_NOTICE:-}" ]] || return 0
+    _TIMER_ENV_REUSED_NOTICE=1
+
+    echo "  ℹ  BORG_PASSCOMMAND not set in this shell; reusing existing ${env_file}" >&2
+    echo "     (delete it or run uninstall to start over)" >&2
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
+# _timer_env_file_line
+# Ensures the credential env file wiring and returns the EnvironmentFile= unit
+# line (empty when there is no wiring). Shared by job units and the verify
+# unit: `borg check` needs the SAME passphrase mechanism as backups, or every
+# scheduled verification of an encrypted repository fails.
+# ───────────────────────────────────────────────────────────────────────────────
+_timer_env_file_line() {
+    local env_dir="${HOME}/.config/copycrow"
+    local env_file="${env_dir}/borg.env"
+
+    # ── SECURITY INVARIANT ────────────────────────────────────────────────────
+    # BORG_PASSPHRASE is a SECRET: it is NEVER written to disk.
+    # Only BORG_PASSCOMMAND (a command *string*, not the secret itself) is
+    # persisted, in a 0600 file inside a 0700 directory, removed by `uninstall`.
+    # NOTE: SSH_AUTH_SOCK is deliberately NOT persisted — its path changes
+    # between sessions, so baking it into the env file guarantees stale-agent
+    # failures after a reboot. For keys with a passphrase, expose an agent to
+    # the user systemd session instead (see README troubleshooting).
+    # ──────────────────────────────────────────────────────────────────────────
+    if [[ -n "${BORG_PASSCOMMAND:-}" ]]; then
+        mkdir -p "$env_dir"
+        chmod 700 "$env_dir"
+        {
+            echo "# copycrow — environment for automatic backups"
+            echo "# Auto-generated. Contains NO secrets:"
+            echo "#   BORG_PASSCOMMAND is a command string, not the secret itself."
+            printf 'BORG_PASSCOMMAND=%s\n' "${BORG_PASSCOMMAND}"
+        } > "$env_file"
+        chmod 600 "$env_file"
+        printf 'EnvironmentFile=%s\n' "$(_timer_systemd_path "$env_file")"
+    elif [[ -f "$env_file" ]]; then
+        # The env file is durable, deliberate state from a previous install.
+        # A re-install from a shell that lost the export (cron, new terminal)
+        # must keep the unit wired to it: regenerating without EnvironmentFile
+        # would silently downgrade every timer to passphrase-less failures.
+        # The operator-facing note is emitted by _timer_env_reused_notice.
+        printf 'EnvironmentFile=%s\n' "$(_timer_systemd_path "$env_file")"
+    fi
+}
+
+# ───────────────────────────────────────────────────────────────────────────────
 # timer_convert_schedule
 # Converts a human-readable schedule to systemd OnCalendar format
 # ───────────────────────────────────────────────────────────────────────────────
@@ -63,59 +174,28 @@ timer_generate() {
     timeout_sec="$(config_get_global 'timeout_start_sec')"
     timeout_sec="${timeout_sec:-3600}"
 
-    local env_dir="${HOME}/.config/copycrow"
-    local env_file="${env_dir}/borg.env"
+    # Once per install, not once per job: the notice is about the credentials
+    # wiring, which is identical for every generated unit.
+    _timer_passphrase_notice
+
+    # Env-file wiring is shared with the verify unit: the no-secrets invariant
+    # and the reuse policy live in _timer_env_file_line.
     local env_line=""
-
-    # ── SECURITY INVARIANT ────────────────────────────────────────────────────
-    # BORG_PASSPHRASE is a SECRET: it is NEVER written to disk.
-    # Only BORG_PASSCOMMAND (a command *string*, not the secret itself) is
-    # persisted, in a 0600 file inside a 0700 directory, removed by `uninstall`.
-    # NOTE: SSH_AUTH_SOCK is deliberately NOT persisted — its path changes
-    # between sessions, so baking it into the env file guarantees stale-agent
-    # failures after a reboot. For keys with a passphrase, expose an agent to
-    # the user systemd session instead (see README troubleshooting).
-    # ──────────────────────────────────────────────────────────────────────────
-    if [[ -n "${BORG_PASSPHRASE:-}" && -z "${BORG_PASSCOMMAND:-}" ]]; then
-        echo "  ⚠  WARNING: BORG_PASSPHRASE detected, but it will NOT be stored on disk."
-        echo "     Automatic backups cannot answer interactive passphrase prompts;"
-        echo "     they will fail until you configure BORG_PASSCOMMAND instead."
-        echo ""
-        echo "     Recommended (via pass):"
-        echo "       sudo apt install pass"
-        echo "       pass insert copycrow/borg"
-        echo "       export BORG_PASSCOMMAND='pass show copycrow/borg'"
-        echo ""
-    fi
-
-    if [[ -n "${BORG_PASSCOMMAND:-}" ]]; then
-        mkdir -p "$env_dir"
-        chmod 700 "$env_dir"
-        {
-            echo "# copycrow — environment for automatic backups"
-            echo "# Auto-generated. Contains NO secrets:"
-            echo "#   BORG_PASSCOMMAND is a command string, not the secret itself."
-            printf 'BORG_PASSCOMMAND=%s\n' "${BORG_PASSCOMMAND}"
-        } > "$env_file"
-        chmod 600 "$env_file"
-        env_line="EnvironmentFile=${env_file}"
-    elif [[ -f "$env_file" ]]; then
-        # The env file is durable, deliberate state from a previous install.
-        # A re-install from a shell that lost the export (cron, new terminal)
-        # must keep the unit wired to it: regenerating without EnvironmentFile
-        # would silently downgrade every timer to passphrase-less failures.
-        env_line="EnvironmentFile=${env_file}"
-        echo "  ℹ  BORG_PASSCOMMAND not set in this shell; reusing existing ${env_file}"
-        echo "     (delete it or run uninstall to start over)"
-    fi
+    env_line="$(_timer_env_file_line)"
+    _timer_env_reused_notice
 
     # If the config lives outside the default location, bake its path into
     # the unit: timers must read the SAME conf the user installed from.
-    # Quoted per systemd Environment= syntax so spaces/% stay literal.
+    # Quoted for systemd Environment= (spaces stay literal); '%' is written
+    # '%%' — systemd would otherwise expand it as a specifier.
     local conf_env_line=""
     if [[ -n "${COPYCROW_CONF:-}" && "${COPYCROW_CONF}" != "${COPYCROW_ROOT}/copycrow.conf" ]]; then
-        conf_env_line="Environment=\"COPYCROW_CONF=${COPYCROW_CONF}\""
+        conf_env_line="Environment=$(_timer_systemd_env_value "COPYCROW_CONF=${COPYCROW_CONF}")"
     fi
+
+    local workdir_line exec_line
+    workdir_line="WorkingDirectory=$(_timer_systemd_path "${COPYCROW_ROOT}")"
+    exec_line="$(_timer_exec_start_line "auto ${section}")"
 
     cat > "${sdir}/${timer_name}.service" << EOF
 [Unit]
@@ -125,8 +205,8 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart="${COPYCROW_ROOT}/copycrow.sh" auto ${section}
-WorkingDirectory=${COPYCROW_ROOT}
+${exec_line}
+${workdir_line}
 ${conf_env_line}
 ${env_line}
 StandardOutput=journal
@@ -219,12 +299,26 @@ timer_generate_verify() {
     sdir="$(_systemd_user_dir)"
     mkdir -p "$sdir"
 
+    # Same credentials wiring (and same once-per-run notices) as job units:
+    # an unstorable passphrase breaks scheduled verification just as much.
+    _timer_passphrase_notice
+
     # Same conf-propagation rule as job units: timers must read the SAME
     # conf they were installed from.
     local conf_env_line=""
     if [[ -n "${COPYCROW_CONF:-}" && "${COPYCROW_CONF}" != "${COPYCROW_ROOT}/copycrow.conf" ]]; then
-        conf_env_line="Environment=\"COPYCROW_CONF=${COPYCROW_CONF}\""
+        conf_env_line="Environment=$(_timer_systemd_env_value "COPYCROW_CONF=${COPYCROW_CONF}")"
     fi
+
+    local workdir_line exec_line
+    workdir_line="WorkingDirectory=$(_timer_systemd_path "${COPYCROW_ROOT}")"
+    exec_line="$(_timer_exec_start_line "verify-all")"
+
+    # `borg check` needs the same passphrase mechanism as backups: without
+    # the env file, every scheduled verification of an encrypted repo fails.
+    local env_line=""
+    env_line="$(_timer_env_file_line)"
+    _timer_env_reused_notice
 
     cat > "${sdir}/${timer_name}.service" << EOF
 [Unit]
@@ -232,9 +326,10 @@ Description=copycrow repository integrity check (borg check)
 
 [Service]
 Type=oneshot
-ExecStart="${COPYCROW_ROOT}/copycrow.sh" verify-all
-WorkingDirectory=${COPYCROW_ROOT}
+${exec_line}
+${workdir_line}
 ${conf_env_line}
+${env_line}
 StandardOutput=journal
 StandardError=journal
 

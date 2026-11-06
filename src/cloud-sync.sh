@@ -109,7 +109,8 @@ _cloud_exec() {
 # _cloud_manifest_load / _cloud_manifest_save
 # Populate/dump _CLOUD_SEEN atomically. Save rewrites via mktemp+mv so a crash
 # mid-write can never truncate previously-known-good state.
-# NOTE: TSV cannot represent tab/newline characters inside relpaths; the upload engine must SKIP such files rather than encode them.
+# NOTE: TSV cannot represent tab/newline characters inside relpaths; the upload
+# engine must SKIP such files rather than encode them.
 # ───────────────────────────────────────────────────────────────────────────────
 _cloud_manifest_load() {
     _CLOUD_SEEN=()

@@ -344,11 +344,28 @@ config_validate_value() {
                 return 1
             fi
             ;;
-        logs_dir|sources)
+        logs_dir)
             if [[ "$value" == *".."* ]]; then
                 echo "ERROR: [$key] must not contain '..'" >&2
                 return 1
             fi
+            ;;
+        sources)
+            if [[ "$value" == *".."* ]]; then
+                echo "ERROR: [$key] must not contain '..'" >&2
+                return 1
+            fi
+            # Every token is a literal path handed to borg AFTER `--`; one
+            # starting with '-' would be read as an option (rejected here).
+            local -a src_tokens=()
+            read -r -a src_tokens <<< "$value"
+            local src_token
+            for src_token in "${src_tokens[@]}"; do
+                if [[ "$src_token" == -* ]]; then
+                    echo "ERROR: [sources] '$src_token' must not start with '-' (borg would read it as an option)" >&2
+                    return 1
+                fi
+            done
             ;;
         compression)
             case "$value" in
@@ -360,20 +377,53 @@ config_validate_value() {
             esac
             ;;
         retention|retention_default)
-            # Only borg prune --keep-* flags followed by numbers.
+            # Strict --keep-* flag/value PAIRS: borg prune fails at runtime
+            # on a dangling flag or a bare value, so fail fast here instead.
             # Word-splitting is intentional: retention is a flag list.
+            # Values are counts, except --keep-within which takes an interval
+            # (<int><char> with char in H/d/w/m/y — borg's own grammar).
+            local expect=""   # "" | number | interval
             local token
             for token in $value; do
-                case "$token" in
-                    --keep-secondly|--keep-minutely|--keep-hourly|--keep-daily|\
---keep-weekly|--keep-monthly|--keep-yearly)
+                case "$expect" in
+                    number)
+                        if [[ "$token" == *[!0-9]* ]]; then
+                            echo "ERROR: [$key] expected a number after the previous flag, got '$token'" >&2
+                            return 1
+                        fi
+                        expect=""
                         ;;
-                    *[!0-9]*)
-                        echo "ERROR: [$key] invalid token '$token' (use e.g. --keep-daily 7)" >&2
-                        return 1
+                    interval)
+                        if [[ ! "$token" =~ ^[0-9]+[Hdwmy]$ ]]; then
+                            echo "ERROR: [$key] expected an interval like '2d' after --keep-within, got '$token'" >&2
+                            return 1
+                        fi
+                        expect=""
+                        ;;
+                    *)
+                        case "$token" in
+                            --keep-last|--keep-secondly|--keep-minutely|--keep-hourly|\
+--keep-daily|--keep-weekly|--keep-monthly|--keep-yearly)
+                                expect="number"
+                                ;;
+                            --keep-within)
+                                expect="interval"
+                                ;;
+                            *)
+                                echo "ERROR: [$key] expected a --keep-* flag, got '$token' (use e.g. --keep-daily 7)" >&2
+                                return 1
+                                ;;
+                        esac
                         ;;
                 esac
             done
+            if [[ "$expect" == "number" ]]; then
+                echo "ERROR: [$key] flag '$token' has no number after it (use e.g. --keep-daily 7)" >&2
+                return 1
+            elif [[ "$expect" == "interval" ]]; then
+                echo "ERROR: [$key] flag '$token' has no interval after it (use e.g. --keep-within 2d)" >&2
+                return 1
+            fi
             ;;
         type)
             case "$value" in
@@ -500,9 +550,12 @@ config_validate() {
         fi
 
         if [[ -n "$sources" ]]; then
+            # Tokenized without side effects: a wildcard in a source name
+            # stays literal instead of expanding against the caller's CWD.
+            local -a source_list=()
+            read -r -a source_list <<< "$sources"
             local source
-            # Word-splitting intentional: sources is a space-separated path list.
-            for source in $sources; do
+            for source in "${source_list[@]}"; do
                 if [[ ! -e "$source" ]]; then
                     echo "WARNING: [$section] source does not exist: $source" >&2
                 fi

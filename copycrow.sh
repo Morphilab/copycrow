@@ -45,7 +45,7 @@ Commands:
   manual <job>      Alias for backup
   auto <job>        Create an automatic backup (used by timers)
   dryrun <job>      Show what would be done without executing
-  list [job]        List backups
+  list [job]        List backups (all hosts, or a job's host)
   open <host> <arch> Open a backup container
   verify <job>      Check repository integrity (borg check)
   verify-all        Verify every configured job's repository
@@ -53,19 +53,19 @@ Commands:
   migrate           Convert legacy config to English format
   install           Install systemd timers
   uninstall         Remove systemd timers
-  status            Show timer status and last backups
+  status            Show configured jobs and timer status
   doctor            Run a system health check
-  help              Show this help
-  --version         Print version
+  help              Show this help (aliases: --help, -h)
+  --version         Print version (alias: -V)
 
 Examples:
   ./copycrow.sh                       # Open TUI menu
   ./copycrow.sh init                  # First-time setup
   ./copycrow.sh backup daily_job      # Manual backup
-  ./copycrow.sh dryrun daily_job      # Simulate backup (writes nothing)
+  ./copycrow.sh dryrun daily_job      # Simulate backup (no backup created)
   ./copycrow.sh auto daily_job        # Automatic backup
   ./copycrow.sh list                  # List all backups
-  ./copycrow.sh verify daily_job      # Integrity check (writes nothing)
+  ./copycrow.sh verify daily_job      # Integrity check (result is logged)
   ./copycrow.sh migrate               # Convert old config
   ./copycrow.sh install               # Install timers
 
@@ -255,8 +255,8 @@ cmd_list() {
             echo "ERROR: Job '$job' not found" >&2
             return 1
         fi
-        echo "Backups for job '$job':"
-        echo "─────────────────────"
+        echo "Backups for host '$host' (job '$job'):"
+        echo "─────────────────────────────────────"
         backup_list "$host" "all"
     else
         declare -A hosts_seen
