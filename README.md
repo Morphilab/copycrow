@@ -1,14 +1,17 @@
 # CopyCrow
 
-[![Version](https://img.shields.io/badge/version-1.3.0-blue.svg)](https://github.com/morphilab/copycrow)
+**English** | [Español](README.es.md)
+
+[![Version](https://img.shields.io/badge/version-1.3.1-blue.svg)](https://github.com/morphilab/copycrow)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Bash](https://img.shields.io/badge/bash-4%2B-orange.svg)](https://www.gnu.org/software/bash/)
-[![Tests](https://img.shields.io/badge/tests-219%2F219%20passing-brightgreen.svg)](tests/)
+[![Bash](https://img.shields.io/badge/bash-4.2%2B-orange.svg)](https://www.gnu.org/software/bash/)
+[![Tests](https://img.shields.io/badge/tests-252%2F252%20passing-brightgreen.svg)](tests/)
 [![ShellCheck](https://img.shields.io/badge/shellcheck-0%20issues-brightgreen.svg)](.shellcheckrc)
 
 Automated and manual backup system based on **Borg Backup** with a terminal interface (TUI) and native **systemd** timers.
 
-> 100% Bash. Zero runtime dependencies beyond the standard GNU/Linux ecosystem.
+> 100% Bash. No Python/Node runtime; requires Borg, whiptail, systemd and
+> util-linux `flock` (plus optional tools for cloud sync and passphrase storage).
 
 **Developer:** [morphilab](https://github.com/morphilab)
 
@@ -18,17 +21,17 @@ Automated and manual backup system based on **Borg Backup** with a terminal inte
 - **Client-side encryption** with Borg (`repokey`)
 - **Deduplication** — only changes between backups are stored
 - **Configurable retention** per job (daily, weekly, monthly)
-- **TUI interface** with `whiptail` for browsing and extracting backups
+- **TUI interface** with `whiptail` for browsing and extracting backups (the menu covers the everyday actions; `init`, `verify-all` and `auto` are CLI-only)
 - **Native automation** with `systemd --user timers` (no custom daemon)
-- **Detailed JSON logs** with timestamps, exit codes, and executed commands
-- **No credentials in code** — uses the system's `~/.ssh/config`
-- **Secrets never touch disk** — `BORG_PASSPHRASE` is never persisted; timers only receive `BORG_PASSCOMMAND`
-- **File locking (atomic)** — prevents concurrent executions of the same job
+- **Detailed JSON logs** with timestamps, status/exit codes, and command context where applicable
+- **No credentials in code** — SSH uses `~/.ssh/config`; cloud sync uses the Proton CLI keyring
+- **BORG_PASSPHRASE never touches disk** — timers receive `BORG_PASSCOMMAND` (plus non-secret config); never embed the passphrase in that command
+- **File locking (atomic)** — prevents concurrent backup/verify/sync executions of the same job
 - **Signal trapping** — automatic cleanup on Ctrl+C / SIGTERM / SIGHUP
-- **Config validation** — enforced fail-fast at load time (anti-injection, whitelists, required fields)
-- **Dry-run mode** — `./copycrow.sh dryrun <job>` simulates without writing
-- **Repository verification** — `verify <job>` / `verify-all` run `borg check`; optional `verify_schedule` timer detects silent corruption
-- **Failure notifications** — optional `[global] on_failure_cmd` hook fired when a backup or verification fails
+- **Config validation** — values validated fail-fast at load (anti-injection, whitelists); required fields checked before job operations
+- **Dry-run mode** — `./copycrow.sh dryrun <job>` simulates without creating a backup or writing logs
+- **Repository verification** — `verify <job>` / `verify-all` run `borg check` (repository/archive consistency; full data verification requires `--verify-data`)
+- **Failure notifications** — optional `[global] on_failure_cmd` hook fired when a backup or per-repository verification fails
 - **Health check** — `doctor` preflights borg (local/remote), SSH, passphrase strategy, linger, systemd session, disk space, directory permissions, and Proton Drive (binary, D-Bus wrapper, session) when cloud sync is configured
 - **Log retention** — `[global] logs_retention_days` auto-purges old JSON logs (default 30)
 - **Bash completion** — commands, job names and hosts (`completions/copycrow.bash`)
@@ -43,9 +46,14 @@ This project was developed with assistance from artificial intelligence tools. G
 |-------------|---------------------------------------|
 | `borgbackup` | `sudo apt install borgbackup`        |
 | `whiptail`  | `sudo apt install whiptail`          |
-| `bash` 4+   | Included in Ubuntu/Debian            |
+| `bash` 4.2+ | Included in Ubuntu/Debian            |
 | `systemd`   | Included in Ubuntu/Debian            |
+| `util-linux` (`flock`) | Included in Ubuntu/Debian   |
 | `pass` (recommended) | `sudo apt install pass`       |
+
+Borg versions verified with the full end-to-end suite: **1.2.4** and **1.4.4**.
+CI installs the distro `borgbackup` package; the workflow does not pin its
+version.
 
 ## Installation
 
@@ -114,6 +122,30 @@ remote_path = /backups/copycrow/daily
 schedule = daily
 retention = --keep-daily 7 --keep-weekly 4
 ```
+
+`sources` is a space-separated list of **literal** paths: no wildcard/glob
+expansion and no `~` (write the full path), and a token starting with `-` is
+rejected so it can never reach Borg as an option. To back up a dynamic set of
+paths, list them explicitly (or generate the conf).
+
+### 4. Using a different config file
+
+Every command that reads configuration honors the `COPYCROW_CONF` environment
+variable (default: `<copycrow-root>/copycrow.conf`), so alternative
+configurations can live anywhere:
+
+```bash
+COPYCROW_CONF=~/configs/copycrow-test.conf ./copycrow.sh backup test_job
+```
+
+`init` is the bootstrap exception: it always targets
+`<copycrow-root>/copycrow.conf`, creating it from the example when missing (an
+existing file is never overwritten). Use `COPYCROW_CONF` with the other
+commands to point at an alternative file.
+
+`install` records the active path in the generated units (when it differs from
+the default), so the timers keep reading the same file you installed from —
+re-running `install` with another `COPYCROW_CONF` re-targets the timers.
 
 ## Security
 
@@ -184,8 +216,8 @@ ssh-add ~/.ssh/id_ed25519
 ./copycrow.sh backup <job>          # Manual backup of a job
 ./copycrow.sh manual <job>          # Alias of backup
 ./copycrow.sh auto <job>            # Automatic backup (used by timers)
-./copycrow.sh dryrun <job>          # Simulate backup (writes nothing)
-./copycrow.sh list [job]            # List backups
+./copycrow.sh dryrun <job>          # Simulate backup (no backup created)
+./copycrow.sh list [job]            # List backups (all hosts, or a job's host)
 ./copycrow.sh open <host> <arch>    # Extract and open container
 ./copycrow.sh verify <job>          # Repository integrity check (borg check)
 ./copycrow.sh verify-all            # Verify every configured repository
@@ -208,6 +240,15 @@ ssh-add ~/.ssh/id_ed25519
 Add `verify_schedule = monthly` to `[global]` and run `install` to get a
 `copycrow-verify.timer` that checks every configured repository on a schedule.
 
+`verify` runs `borg check --info`. That validates repository and archive
+consistency, but it does not pass `--verify-data`: full cryptographic
+verification of file data requires running `borg check --verify-data` manually.
+
+Each check runs under the job's own lock, so it never interleaves with a
+running backup: `verify <job>` refuses to start while the job is busy, and
+`verify-all` (or the scheduled timer) **skips** busy jobs with a
+`skipping verification` warning — never counted as a failure.
+
 **Get notified when a backup fails:**
 ```ini
 [global]
@@ -221,7 +262,9 @@ on_failure_cmd = /usr/local/bin/copycrow-on-failure
 ```
 The hook receives context via environment variables:
 `COPYCROW_FAILED_JOB`, `COPYCROW_FAILURE_ARCHIVE`, `COPYCROW_FAILURE_EXIT_CODE`.
-A failing hook is logged but never alters the backup's own result.
+A failing hook is logged but never alters the backup's own result. A repository
+that cannot be locked by `verify-all` is counted as a verification failure but
+does not invoke the hook.
 
 **Keep logs under control:** `logs_retention_days = 30` in `[global]` purges
 `logs/copycrow-*.log` older than N days automatically after each backup.
@@ -273,7 +316,8 @@ Manual retry and inspection:
 
 ### Notes and limitations
 
-* Headless machines and systemd timers are supported: every CLI call is
+* Headless machines and systemd timers are supported: when there is no
+  graphical session (`DISPLAY`/`WAYLAND_DISPLAY` unset), every CLI call is
   automatically wrapped in `dbus-run-session`. Keep `libsecret-1-0`,
   `dbus-x11` installed and the login keyring unlocked.
 * The first sync uploads the whole repository (~1 API request per file);
@@ -294,7 +338,8 @@ source completions/copycrow.bash
 mkdir -p ~/.local/share/bash-completion/completions
 cp completions/copycrow.bash ~/.local/share/bash-completion/completions/copycrow
 ```
-Completes commands, job names (from the active conf) and SSH hosts.
+Completes commands, job names (from `COPYCROW_CONF`, `COPYCROW_ROOT/copycrow.conf`,
+or `./copycrow.conf`) and SSH hosts.
 
 ## Project Structure
 
@@ -304,12 +349,15 @@ copycrow/
 ├── copycrow.conf            ← your config (gitignored)
 ├── copycrow.conf.example    ← example configuration
 ├── README.md
+├── README.es.md             ← Spanish translation
 ├── LICENSE
 ├── CHANGELOG.md
 ├── SECURITY.md
 ├── VERSION
 ├── .gitignore
 ├── .shellcheckrc
+├── .github/
+│   └── workflows/ci.yml     ← CI (shellcheck, tests, smokes)
 ├── src/
 │   ├── config-parser.sh     ← INI parser + validation
 │   ├── safety.sh            ← traps, locks, cleanup
@@ -330,6 +378,7 @@ copycrow/
 │   ├── safety.bats
 │   ├── timer-generator.bats
 │   ├── tui.bats
+│   ├── integration-borg.bats
 │   └── integration-extract.bats
 ├── .mnt/                    ← temporary extraction
 ├── .locks/                  ← mutual exclusion locks
@@ -342,6 +391,8 @@ copycrow/
 # Requires: bats-core (https://github.com/bats-core/bats-core)
 sudo apt install bats
 bats tests/
+# The integration suites (integration-*.bats) exercise REAL borg: they
+# self-skip when `borg` is not installed.
 ```
 
 ## Linting
@@ -377,11 +428,17 @@ Borg is not installed on the remote server:
 ssh host "sudo apt install borgbackup"
 ```
 
-**"missing_passphrase" (in automatic timers)**
+**"A passphrase is needed to encrypt the repository" (in automatic timers)**
 You need `BORG_PASSCOMMAND` configured — `BORG_PASSPHRASE` alone is never persisted to disk (by design). See the [Security](#security) section.
 
-**"BORG_PASSPHRASE is not set" / passphrase prompts in timers**
+**Passphrase prompts in timers (no passphrase configured)**
 Timers cannot answer interactive prompts. Configure the passphrase via `pass` + `BORG_PASSCOMMAND` (see [Security](#security)).
+
+**"The repository exists but cannot be opened (wrong passphrase or key material)"**
+The repository is fine — the supplied credentials cannot open it. Check that
+`BORG_PASSCOMMAND` returns the right passphrase (timers never prompt), or run
+the same command once from a shell where you can enter the passphrase
+interactively.
 
 **"Repository does not exist"**
 The repo is initialized automatically on the first backup. If it fails, check:
@@ -389,7 +446,7 @@ The repo is initialized automatically on the first backup. If it fails, check:
 - Borg installed on the remote server
 - Write permissions on `remote_path`
 
-**"copycrow.conf not found"**
+**"Configuration file not found: <path>"**
 ```bash
 ./copycrow.sh init
 ```
@@ -412,7 +469,8 @@ If you upgraded from an older version with Spanish config keys:
 ```bash
 ./copycrow.sh migrate    # Converts config to English v1.0.0 format
 ```
-A backup is saved as `copycrow.conf.bak`.
+A backup is saved as `copycrow.conf.bak` when the file actually changes; if it
+is already in English, the temporary `.bak` is removed.
 
 ## License
 

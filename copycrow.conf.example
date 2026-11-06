@@ -40,7 +40,7 @@ manual_prefix = manual-
 # extractions are contained under it). logs_dir accepts absolute paths.
 mount_dir = .mnt
 
-# Log directory (relative to project)
+# Log directory (relative to project, or an absolute path)
 logs_dir = logs
 
 # Max duration of one automatic backup (systemd TimeoutStartSec).
@@ -72,7 +72,10 @@ logs_dir = logs
 #
 # Available variables:
 #   type        = automatic | manual
-#   sources     = space-separated paths (e.g. /home /etc /var/log)
+#   sources     = space-separated paths (e.g. /home /etc /var/log). LITERAL
+#                 paths: no wildcard/glob expansion and no '~' (write the full
+#                 path); a token starting with '-' is rejected (borg would read
+#                 it as an option)
 #   host        = SSH alias configured in ~/.ssh/config ("local" for local destinations)
 #   remote_path = path of the Borg repository on the server
 #   schedule    = daily | weekly | monthly | minutesHH:MM (automatic only;
